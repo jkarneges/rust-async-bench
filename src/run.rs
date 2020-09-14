@@ -1,9 +1,10 @@
 use crate::fakeio::{FakeListener, FakeStream, Poll, Stats, READABLE, WRITABLE};
-use crate::future::{AsyncFakeListener, AsyncFakeStream, Blob, Executor, FakeReactor};
+use crate::future::{AsyncFakeListener, AsyncFakeStream, Executor, FakeReactor};
 use crate::list;
 use slab::Slab;
 use std::io;
 use std::io::{Read, Write};
+use std::mem;
 
 const CONNS_MAX: usize = 32;
 
@@ -159,7 +160,7 @@ pub fn run_sync(stats: &Stats) {
 }
 
 async fn listen(
-    spawn: fn(*const (), Blob) -> Result<(), ()>,
+    spawn: fn(*const (), *const (), usize) -> Result<(), ()>,
     ctx: *const (),
     reactor: &FakeReactor<'_>,
     stats: &Stats,
@@ -170,7 +171,8 @@ async fn listen(
         let stream = listener.accept().await?;
 
         let f = do_async(spawn, ctx, reactor, stats, AsyncInvoke::Connection(stream));
-        spawn(ctx, Blob::from(f)).unwrap();
+        spawn(ctx, &f as *const _ as *const (), mem::size_of_val(&f)).unwrap();
+        mem::forget(f);
     }
 
     Ok(())
@@ -181,14 +183,14 @@ async fn connection(mut stream: AsyncFakeStream<'_, '_>) -> Result<(), io::Error
     let mut buf_len = 0;
 
     while !(&buf[..buf_len]).contains(&b'\n') {
-        let size = stream.read(&mut buf[buf_len..]).await.unwrap();
+        let size = stream.read(&mut buf[buf_len..]).await?;
         buf_len += size;
     }
 
     let mut sent = 0;
 
     while sent < buf_len {
-        let size = stream.write(&buf[sent..buf_len]).await.unwrap();
+        let size = stream.write(&buf[sent..buf_len]).await?;
         sent += size;
     }
 
@@ -201,7 +203,7 @@ enum AsyncInvoke<'r, 's> {
 }
 
 async fn do_async(
-    spawn: fn(*const (), Blob) -> Result<(), ()>,
+    spawn: fn(*const (), *const (), usize) -> Result<(), ()>,
     ctx: *const (),
     reactor: &FakeReactor<'_>,
     stats: &Stats,

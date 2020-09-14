@@ -9,38 +9,7 @@ use std::io::{Read, Write};
 use std::mem;
 use std::pin::Pin;
 use std::ptr;
-use std::slice;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-
-pub struct Blob {
-    len: usize,
-    data: [u8; 1024],
-}
-
-impl Blob {
-    pub fn from<T>(v: T) -> Self {
-        let len = mem::size_of::<T>();
-
-        assert!(len <= 1024);
-
-        let s = unsafe { slice::from_raw_parts(&v as *const T as *const u8, len) };
-
-        let mut buf = [0; 1024];
-
-        &mut buf[..len].copy_from_slice(s);
-
-        mem::forget(v);
-
-        Self {
-            len: len,
-            data: buf,
-        }
-    }
-
-    pub fn data(&self) -> &[u8] {
-        &self.data[..self.len]
-    }
-}
 
 pub trait Reactor {
     fn poll(&self) -> Result<(), io::Error>;
@@ -277,16 +246,16 @@ where
         Ok(())
     }
 
-    pub fn get_spawn_blob(&self) -> fn(*const (), Blob) -> Result<(), ()> {
+    pub fn get_spawn_blob(&self) -> fn(*const (), *const (), usize) -> Result<(), ()> {
         Self::spawn_blob
     }
 
-    pub fn spawn_blob(ctx: *const (), b: Blob) -> Result<(), ()> {
+    pub fn spawn_blob(ctx: *const (), ptr: *const (), size: usize) -> Result<(), ()> {
         let executor = unsafe { (ctx as *const Executor<R, F>).as_ref().unwrap() };
 
-        assert_eq!(b.data().len(), mem::size_of::<F>());
+        assert_eq!(size, mem::size_of::<F>());
 
-        let f = unsafe { ptr::read(b.data().as_ptr() as *const F) };
+        let f = unsafe { ptr::read(ptr as *const F) };
 
         executor.spawn(f)
     }
