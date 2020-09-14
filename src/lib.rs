@@ -9,7 +9,7 @@ use crate::run::{run_async, run_sync};
 pub fn run() {
     let stats = Stats::new(true);
     run_sync(&stats);
-    println!("sync: {}", stats);
+    println!("sync:  {}", stats);
 
     let stats = Stats::new(true);
     run_async(&stats);
