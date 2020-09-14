@@ -374,6 +374,7 @@ name = "rust-async-bench"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "libc",
  "slab",
 ]
 

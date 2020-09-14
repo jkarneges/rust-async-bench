@@ -11,6 +11,57 @@ struct StatsData {
     accept: usize,
     read: usize,
     write: usize,
+
+    pipe_fds: Option<[libc::c_int; 2]>,
+}
+
+impl StatsData {
+    fn new(syscalls: bool) -> Self {
+        let pipe_fds = if syscalls {
+            let mut pipe_fds: [libc::c_int; 2] = [0; 2];
+
+            let ret = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) };
+            assert_eq!(ret, 0);
+
+            let ret = unsafe { libc::fcntl(pipe_fds[0], libc::F_SETFL, libc::O_NONBLOCK) };
+            assert_eq!(ret, 0);
+
+            Some(pipe_fds)
+        } else {
+            None
+        };
+
+        Self {
+            register: 0,
+            unregister: 0,
+            poll: 0,
+            accept: 0,
+            read: 0,
+            write: 0,
+            pipe_fds,
+        }
+    }
+
+    fn do_call(&mut self) {
+        if let Some(fds) = &self.pipe_fds {
+            let mut dest: [u8; 1] = [0; 1];
+
+            let ret = unsafe { libc::read(fds[0], dest.as_mut_ptr() as *mut libc::c_void, 1) };
+            assert_eq!(ret, -1);
+        }
+    }
+}
+
+impl Drop for StatsData {
+    fn drop(&mut self) {
+        if let Some(fds) = &self.pipe_fds {
+            let ret = unsafe { libc::close(fds[0]) };
+            assert_eq!(ret, 0);
+
+            let ret = unsafe { libc::close(fds[1]) };
+            assert_eq!(ret, 0);
+        }
+    }
 }
 
 pub struct Stats {
@@ -18,41 +69,52 @@ pub struct Stats {
 }
 
 impl Stats {
-    pub fn new() -> Self {
+    pub fn new(syscalls: bool) -> Self {
         Self {
-            data: RefCell::new(StatsData {
-                register: 0,
-                unregister: 0,
-                poll: 0,
-                accept: 0,
-                read: 0,
-                write: 0,
-            }),
+            data: RefCell::new(StatsData::new(syscalls)),
         }
     }
 
     fn inc_register(&self) {
-        self.data.borrow_mut().register += 1;
+        let data = &mut *self.data.borrow_mut();
+
+        data.do_call();
+        data.register += 1;
     }
 
     fn inc_unregister(&self) {
-        self.data.borrow_mut().unregister += 1;
+        let data = &mut *self.data.borrow_mut();
+
+        data.do_call();
+        data.unregister += 1;
     }
 
     fn inc_poll(&self) {
-        self.data.borrow_mut().poll += 1;
+        let data = &mut *self.data.borrow_mut();
+
+        data.do_call();
+        data.poll += 1;
     }
 
     fn inc_accept(&self) {
-        self.data.borrow_mut().accept += 1;
+        let data = &mut *self.data.borrow_mut();
+
+        data.do_call();
+        data.accept += 1;
     }
 
     fn inc_read(&self) {
-        self.data.borrow_mut().read += 1;
+        let data = &mut *self.data.borrow_mut();
+
+        data.do_call();
+        data.read += 1;
     }
 
     fn inc_write(&self) {
-        self.data.borrow_mut().write += 1;
+        let data = &mut *self.data.borrow_mut();
+
+        data.do_call();
+        data.write += 1;
     }
 }
 
