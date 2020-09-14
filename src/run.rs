@@ -78,7 +78,7 @@ pub fn run_sync(stats: &Stats) {
 
     let mut can_accept = true;
 
-    let mut accept_left = 10;
+    let mut accept_left = CONNS_MAX;
 
     loop {
         while accept_left > 0 && can_accept {
@@ -167,7 +167,7 @@ async fn listen(
 ) -> Result<(), io::Error> {
     let listener = AsyncFakeListener::new(reactor, stats);
 
-    for _ in 0..10 {
+    for _ in 0..CONNS_MAX {
         let stream = listener.accept().await?;
 
         let f = do_async(spawn, ctx, reactor, stats, AsyncInvoke::Connection(stream));
