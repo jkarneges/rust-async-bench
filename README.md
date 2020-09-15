@@ -33,7 +33,7 @@ Is async Rust "zero cost"?
 
 The non-async benchmarks win, and the async engine in this project is borderline contrived and probably cannot be meaningfully optimized further. Thus, it is safe to say there is a cost to async Rust. However, it is important to put this in perspective:
 
-* The cost is only some in-app state and function calls. Async Rust does not require heap allocations, threading primitives, or other conventionally costly operations.
+* The cost is only some in-app state and function calls. Async Rust does not require heap allocations, threading primitives, or other conventionally costly operations. The number of system calls can be kept the same as a poll loop.
 
 * The cost of doing anything meaningful in an application will likely dwarf the cost of async execution. For example, merely adding bogus system calls closes the gap between the benchmarks considerably, with the non-async implementation being only 9% faster.
 
