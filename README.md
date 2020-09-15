@@ -8,8 +8,8 @@ This project attempts to compare the performance of a manually written poll loop
 $ cargo run
     Finished dev [unoptimized + debuginfo] target(s) in 0.02s
      Running `target/debug/rust-async-bench`
-sync:  StatsData { register: 33, unregister: 33, poll: 34, accept: 64, read: 64, write: 64, pipe_fds: Some([3, 4]) }
-async: StatsData { register: 33, unregister: 33, poll: 34, accept: 64, read: 64, write: 64, pipe_fds: Some([5, 6]) }
+sync:  StatsMetrics { register: 33, unregister: 33, poll: 34, accept: 64, read: 64, write: 64 }
+async: StatsMetrics { register: 33, unregister: 33, poll: 34, accept: 64, read: 64, write: 64 }
 ```
 
 ## Run benchmark

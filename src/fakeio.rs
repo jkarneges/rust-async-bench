@@ -4,14 +4,17 @@ use std::fmt;
 use std::io;
 
 #[derive(Debug)]
-struct StatsData {
+struct StatsMetrics {
     register: usize,
     unregister: usize,
     poll: usize,
     accept: usize,
     read: usize,
     write: usize,
+}
 
+struct StatsData {
+    metrics: StatsMetrics,
     pipe_fds: Option<[libc::c_int; 2]>,
 }
 
@@ -32,12 +35,14 @@ impl StatsData {
         };
 
         Self {
-            register: 0,
-            unregister: 0,
-            poll: 0,
-            accept: 0,
-            read: 0,
-            write: 0,
+            metrics: StatsMetrics {
+                register: 0,
+                unregister: 0,
+                poll: 0,
+                accept: 0,
+                read: 0,
+                write: 0,
+            },
             pipe_fds,
         }
     }
@@ -79,48 +84,48 @@ impl Stats {
         let data = &mut *self.data.borrow_mut();
 
         data.do_call();
-        data.register += 1;
+        data.metrics.register += 1;
     }
 
     fn inc_unregister(&self) {
         let data = &mut *self.data.borrow_mut();
 
         data.do_call();
-        data.unregister += 1;
+        data.metrics.unregister += 1;
     }
 
     fn inc_poll(&self) {
         let data = &mut *self.data.borrow_mut();
 
         data.do_call();
-        data.poll += 1;
+        data.metrics.poll += 1;
     }
 
     fn inc_accept(&self) {
         let data = &mut *self.data.borrow_mut();
 
         data.do_call();
-        data.accept += 1;
+        data.metrics.accept += 1;
     }
 
     fn inc_read(&self) {
         let data = &mut *self.data.borrow_mut();
 
         data.do_call();
-        data.read += 1;
+        data.metrics.read += 1;
     }
 
     fn inc_write(&self) {
         let data = &mut *self.data.borrow_mut();
 
         data.do_call();
-        data.write += 1;
+        data.metrics.write += 1;
     }
 }
 
 impl fmt::Display for Stats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", *self.data.borrow())
+        write!(f, "{:?}", self.data.borrow().metrics)
     }
 }
 
