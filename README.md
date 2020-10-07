@@ -18,7 +18,7 @@ async: register=33 unregister=33 poll=34 accept=64 read=64 write=64
 cargo bench
 ```
 
-Some results running on Linux:
+Each benchmark measures 32 request/response transactions. Some results running on Linux:
 
 ```
 run_sync                time:   [4.7783us 4.7919us 4.8089us]
