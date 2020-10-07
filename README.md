@@ -61,6 +61,6 @@ It is relatively straightforward to write a single-threaded poll loop server tha
 
 Further notes:
 
-* The waker concept seems to exist to enable decoupling task execution from I/O, and it is possible to implement an executor without a separate reactor object or using wakers. However, the implementation uses wakers anyway, as it is how Rust async/await is intended to work.
+* The waker concept seems to exist to enable decoupling task execution from I/O. However, it is possible to implement an executor without a separate reactor object or using wakers. The implementation uses wakers anyway, as it is how Rust async/await is intended to work.
 
 * A global executor would be reasonable, and would make it easier to manage the safety around waker lifetimes. However, it's unclear how an executor of a generic `F` would be instantiated as a global variable, when `F` is an anonymous future.
