@@ -37,7 +37,7 @@ The non-async benchmarks win, and the async engine in this project is borderline
 
 * The cost of doing anything meaningful in an application will likely dwarf the cost of async execution. For example, merely adding bogus system calls closes the gap between the benchmarks considerably, with the non-async implementation being only 9% faster.
 
-* The benchmarks test 32 requests. The difference between the async and non-async syscall benchmarks is 12.3us. Divided by 32, that's an overhead of around 400ns per request. In a server app, that's practically free.
+* The benchmarks test 32 requests. The difference between the async and non-async syscall benchmarks is 12.3us. Divided by 32, that's an overhead of around 385ns per request. In a server app, that's practically free. For comparison, `Box::new(mem::MaybeUninit::<[u8; 16384]>::uninit())` on the same machine takes 465ns.
 
 ## How it works
 
