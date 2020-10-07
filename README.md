@@ -20,12 +20,12 @@ cargo bench
 
 Some results running on Linux:
 
-| Function                | Time     |
-| ----------------------- | -------- |
-| run_sync                |   4.37us |
-| run_async               |  16.84us |
-| run_sync_with_syscalls  | 140.76us |
-| run_async_with_syscalls | 153.87us |
+```
+run_sync                time:   [4.7783us 4.7919us 4.8089us]
+run_async               time:   [16.847us 16.928us 17.025us]
+run_sync_with_syscalls  time:   [138.07us 141.20us 147.21us]
+run_async_with_syscalls time:   [152.09us 153.50us 155.30us]
+```
 
 ## Analysis
 
@@ -37,4 +37,4 @@ The non-async benchmarks win, and the async engine in this project is borderline
 
 * The cost of doing anything meaningful in an application will likely dwarf the cost of async execution. For example, merely adding bogus system calls closes the gap between the benchmarks considerably, with the non-async implementation being only 9% faster.
 
-* The benchmarks test 32 requests. The difference between the async and non-async syscall benchmarks is around 13us. Divided by 32, that's an overhead of 400ns per request. In a server app, that's practically free.
+* The benchmarks test 32 requests. The difference between the async and non-async syscall benchmarks is 12.3us. Divided by 32, that's an overhead of around 400ns per request. In a server app, that's practically free.
