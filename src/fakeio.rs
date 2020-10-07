@@ -125,7 +125,13 @@ impl Stats {
 
 impl fmt::Display for Stats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.data.borrow().metrics)
+        let m = &self.data.borrow().metrics;
+
+        write!(
+            f,
+            "register={} unregister={} poll={} accept={} read={} write={}",
+            m.register, m.unregister, m.poll, m.accept, m.read, m.write
+        )
     }
 }
 
