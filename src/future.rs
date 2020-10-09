@@ -136,70 +136,81 @@ impl Reactor for FakeReactor<'_> {
     }
 }
 
-static VTABLE: RawWakerVTable = RawWakerVTable::new(vt_clone, vt_wake, vt_wake_by_ref, vt_drop);
-
-struct SharedWaker {
-    ctx: *const (),
+struct SharedWaker<'r, R, F> {
+    executor: *const Executor<'r, R, F>,
     task_id: usize,
-    add_ref: fn(*const (), usize),
-    remove_ref: fn(*const (), usize),
-    wake: fn(*const (), usize),
 }
 
-impl SharedWaker {
+impl<'r, R: 'r, F> SharedWaker<'r, R, F>
+where
+    R: Reactor,
+    F: Future<Output = ()>,
+{
     unsafe fn as_std_waker(&self) -> Waker {
-        (self.add_ref)(self.ctx, self.task_id);
+        let executor = self.executor.as_ref().unwrap();
 
-        let rw = RawWaker::new(self as *const SharedWaker as *const (), &VTABLE);
+        executor.add_waker_ref(self.task_id);
+
+        let rw = RawWaker::new(self as *const Self as *const (), Self::vtable());
 
         Waker::from_raw(rw)
     }
+
+    unsafe fn clone(data: *const ()) -> RawWaker {
+        let s = (data as *const Self).as_ref().unwrap();
+
+        let executor = s.executor.as_ref().unwrap();
+
+        executor.add_waker_ref(s.task_id);
+
+        RawWaker::new(data, &Self::vtable())
+    }
+
+    unsafe fn wake(data: *const ()) {
+        Self::wake_by_ref(data);
+
+        Self::drop(data);
+    }
+
+    unsafe fn wake_by_ref(data: *const ()) {
+        let s = (data as *const Self).as_ref().unwrap();
+
+        let executor = s.executor.as_ref().unwrap();
+
+        executor.wake(s.task_id);
+    }
+
+    unsafe fn drop(data: *const ()) {
+        let s = (data as *const Self).as_ref().unwrap();
+
+        let executor = s.executor.as_ref().unwrap();
+
+        executor.remove_waker_ref(s.task_id);
+    }
+
+    fn vtable() -> &'static RawWakerVTable {
+        &RawWakerVTable::new(Self::clone, Self::wake, Self::wake_by_ref, Self::drop)
+    }
 }
 
-unsafe fn vt_clone(data: *const ()) -> RawWaker {
-    let s = (data as *const SharedWaker).as_ref().unwrap();
-
-    (s.add_ref)(s.ctx, s.task_id);
-
-    RawWaker::new(data, &VTABLE)
-}
-
-unsafe fn vt_wake(data: *const ()) {
-    vt_wake_by_ref(data);
-
-    vt_drop(data);
-}
-
-unsafe fn vt_wake_by_ref(data: *const ()) {
-    let s = (data as *const SharedWaker).as_ref().unwrap();
-
-    (s.wake)(s.ctx, s.task_id);
-}
-
-unsafe fn vt_drop(data: *const ()) {
-    let s = (data as *const SharedWaker).as_ref().unwrap();
-
-    (s.remove_ref)(s.ctx, s.task_id);
-}
-
-struct Task<F> {
+struct Task<'r, R, F> {
     fut: Option<F>,
-    waker: SharedWaker,
+    waker: SharedWaker<'r, R, F>,
     waker_refs: usize,
     awake: bool,
 }
 
-struct Tasks<F> {
-    nodes: Slab<list::Node<Task<F>>>,
+struct Tasks<'r, R, F> {
+    nodes: Slab<list::Node<Task<'r, R, F>>>,
     next: list::List,
 }
 
 pub struct Executor<'r, R, F> {
     reactor: &'r R,
-    tasks: RefCell<Tasks<F>>,
+    tasks: RefCell<Tasks<'r, R, F>>,
 }
 
-impl<'r, R, F> Executor<'r, R, F>
+impl<'r, R: 'r, F> Executor<'r, R, F>
 where
     R: Reactor,
     F: Future<Output = ()>,
@@ -225,11 +236,8 @@ where
         let key = entry.key();
 
         let waker = SharedWaker {
-            ctx: self as *const Executor<R, F> as *const (),
+            executor: self,
             task_id: key,
-            add_ref: Self::add_ref,
-            remove_ref: Self::remove_ref,
-            wake: Self::wake,
         };
 
         let task = Task {
@@ -277,7 +285,7 @@ where
 
                     task.awake = false;
 
-                    (nkey, task as *mut Task<F>)
+                    (nkey, task as *mut Task<R, F>)
                 };
 
                 // task won't move/drop while this pointer is in use
@@ -322,20 +330,16 @@ where
         }
     }
 
-    fn add_ref(ctx: *const (), task_id: usize) {
-        let executor = unsafe { (ctx as *const Executor<R, F>).as_ref().unwrap() };
-
-        let tasks = &mut *executor.tasks.borrow_mut();
+    fn add_waker_ref(&self, task_id: usize) {
+        let tasks = &mut *self.tasks.borrow_mut();
 
         let task = &mut tasks.nodes[task_id].value;
 
         task.waker_refs += 1;
     }
 
-    fn remove_ref(ctx: *const (), task_id: usize) {
-        let executor = unsafe { (ctx as *const Executor<R, F>).as_ref().unwrap() };
-
-        let tasks = &mut *executor.tasks.borrow_mut();
+    fn remove_waker_ref(&self, task_id: usize) {
+        let tasks = &mut *self.tasks.borrow_mut();
 
         let task = &mut tasks.nodes[task_id].value;
 
@@ -344,10 +348,8 @@ where
         task.waker_refs -= 1;
     }
 
-    fn wake(ctx: *const (), task_id: usize) {
-        let executor = unsafe { (ctx as *const Executor<R, F>).as_ref().unwrap() };
-
-        let tasks = &mut *executor.tasks.borrow_mut();
+    fn wake(&self, task_id: usize) {
+        let tasks = &mut *self.tasks.borrow_mut();
 
         let task = &mut tasks.nodes[task_id].value;
 
