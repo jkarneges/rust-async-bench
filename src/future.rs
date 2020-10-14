@@ -426,8 +426,8 @@ pub struct ReadFuture<'a, 'r, 's> {
 impl<'a, 'r, 's: 'a> Future for ReadFuture<'a, 'r, 's> {
     type Output = Result<usize, io::Error>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        let f = unsafe { self.get_unchecked_mut() };
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        let f = &mut *self;
 
         f.s.handle.bind_waker(cx.waker().clone());
 
@@ -461,8 +461,8 @@ pub struct WriteFuture<'a, 'r, 's> {
 impl<'a, 'r, 's: 'a> Future for WriteFuture<'a, 'r, 's> {
     type Output = Result<usize, io::Error>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        let f = unsafe { self.get_unchecked_mut() };
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        let f = &mut *self;
 
         f.s.handle.bind_waker(cx.waker().clone());
 
@@ -495,8 +495,8 @@ pub struct AcceptFuture<'a, 'r, 's> {
 impl<'a: 's, 'r, 's> Future for AcceptFuture<'a, 'r, 's> {
     type Output = Result<AsyncFakeStream<'r, 's>, io::Error>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        let f = unsafe { self.get_unchecked_mut() };
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        let f = &mut *self;
 
         f.l.handle.bind_waker(cx.waker().clone());
 
