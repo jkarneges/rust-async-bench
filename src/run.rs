@@ -1,10 +1,14 @@
 use crate::fakeio::{FakeListener, FakeStream, Poll, Stats, READABLE, WRITABLE};
-use crate::future::{AsyncFakeListener, AsyncFakeStream, Executor, FakeReactor};
+use crate::future::{AsyncFakeListener, AsyncFakeStream, Executor, FakeReactor, Reactor};
 use crate::list;
+use futures::executor::{LocalPool, LocalSpawner};
+use futures::task::LocalSpawnExt;
 use slab::Slab;
+use std::cell::RefCell;
 use std::io;
 use std::io::{Read, Write};
 use std::mem;
+use std::rc::Rc;
 
 const CONNS_MAX: usize = 32;
 
@@ -13,8 +17,8 @@ enum ConnectionState {
     SendingResponse,
 }
 
-struct Connection<'a> {
-    stream: FakeStream<'a>,
+struct Connection {
+    stream: FakeStream,
     can_read: bool,
     can_write: bool,
     state: ConnectionState,
@@ -23,7 +27,7 @@ struct Connection<'a> {
     sent: usize,
 }
 
-impl Connection<'_> {
+impl Connection {
     fn process(&mut self) -> bool {
         loop {
             match self.state {
@@ -64,12 +68,12 @@ impl Connection<'_> {
     }
 }
 
-pub fn run_sync(stats: &Stats) {
-    let poll = Poll::new(CONNS_MAX + 1, &stats);
+pub fn run_sync(stats: &Rc<Stats>) {
+    let poll = Poll::new(CONNS_MAX + 1, stats.clone());
 
     let mut events = Slab::with_capacity(CONNS_MAX + 1);
 
-    let listener = FakeListener::new(&stats);
+    let listener = FakeListener::new(stats.clone());
 
     poll.register(&listener, 0, READABLE);
 
@@ -159,28 +163,63 @@ pub fn run_sync(stats: &Stats) {
     poll.unregister(&listener);
 }
 
+pub struct AsyncPrealloc {
+    pub stats: Rc<Stats>,
+    pub reactor: Rc<FakeReactor>,
+    pub task_count: Rc<RefCell<usize>>,
+}
+
+impl AsyncPrealloc {
+    pub fn new(stats_syscalls: bool) -> Self {
+        let stats = Rc::new(Stats::new(stats_syscalls));
+        let reactor = Rc::new(FakeReactor::new(CONNS_MAX + 1, &stats));
+        let task_count = Rc::new(RefCell::new(0));
+
+        Self {
+            stats,
+            reactor,
+            task_count,
+        }
+    }
+}
+
 async fn listen(
+    task_count: Rc<RefCell<usize>>,
     spawn: unsafe fn(*const (), *const (), usize) -> Result<(), ()>,
     ctx: *const (),
-    reactor: &FakeReactor<'_>,
-    stats: &Stats,
+    reactor: &Rc<FakeReactor>,
+    stats: &Rc<Stats>,
 ) -> Result<(), io::Error> {
-    let listener = AsyncFakeListener::new(reactor, stats);
+    let listener = AsyncFakeListener::new(reactor, stats.clone());
 
     for _ in 0..CONNS_MAX {
         let stream = listener.accept().await?;
 
-        let f = do_async(spawn, ctx, reactor, stats, AsyncInvoke::Connection(stream));
+        *task_count.borrow_mut() += 1;
+
+        let f = do_async(
+            task_count.clone(),
+            spawn,
+            ctx,
+            reactor.clone(),
+            stats.clone(),
+            AsyncInvoke::Connection(stream),
+        );
 
         unsafe { spawn(ctx, &f as *const _ as *const (), mem::size_of_val(&f)).unwrap() };
 
         mem::forget(f);
     }
 
+    *task_count.borrow_mut() -= 1;
+
     Ok(())
 }
 
-async fn connection(mut stream: AsyncFakeStream<'_, '_>) -> Result<(), io::Error> {
+async fn connection(
+    task_count: Rc<RefCell<usize>>,
+    mut stream: AsyncFakeStream,
+) -> Result<(), io::Error> {
     let mut buf = [0; 128];
     let mut buf_len = 0;
 
@@ -196,43 +235,130 @@ async fn connection(mut stream: AsyncFakeStream<'_, '_>) -> Result<(), io::Error
         sent += size;
     }
 
+    *task_count.borrow_mut() -= 1;
+
     Ok(())
 }
 
-enum AsyncInvoke<'r, 's> {
+enum AsyncInvoke {
     Listen,
-    Connection(AsyncFakeStream<'r, 's>),
+    Connection(AsyncFakeStream),
 }
 
 async fn do_async(
+    task_count: Rc<RefCell<usize>>,
     spawn: unsafe fn(*const (), *const (), usize) -> Result<(), ()>,
     ctx: *const (),
-    reactor: &FakeReactor<'_>,
-    stats: &Stats,
-    invoke: AsyncInvoke<'_, '_>,
+    reactor: Rc<FakeReactor>,
+    stats: Rc<Stats>,
+    invoke: AsyncInvoke,
 ) {
     match invoke {
-        AsyncInvoke::Listen => listen(spawn, ctx, reactor, stats).await.unwrap(),
-        AsyncInvoke::Connection(stream) => connection(stream).await.unwrap(),
+        AsyncInvoke::Listen => listen(task_count, spawn, ctx, &reactor, &stats)
+            .await
+            .unwrap(),
+        AsyncInvoke::Connection(stream) => connection(task_count, stream).await.unwrap(),
     }
 }
 
-pub fn run_async(stats: &Stats) {
-    let reactor = FakeReactor::new(CONNS_MAX + 1, &stats);
-
-    let executor = Executor::new(&reactor, CONNS_MAX + 1);
+pub fn run_async(prealloc: &AsyncPrealloc) {
+    let executor = Executor::new(&*prealloc.reactor, CONNS_MAX + 1);
 
     let ctx = &executor as *const Executor<_, _> as *const ();
 
+    *prealloc.task_count.borrow_mut() += 1;
+
     executor
         .spawn(do_async(
+            prealloc.task_count.clone(),
             executor.get_spawn_blob(),
             ctx,
-            &reactor,
-            &stats,
+            prealloc.reactor.clone(),
+            prealloc.stats.clone(),
             AsyncInvoke::Listen,
         ))
         .unwrap();
 
     executor.exec();
+
+    assert_eq!(*prealloc.task_count.borrow(), 0);
+}
+
+async fn listen2(
+    task_count: Rc<RefCell<usize>>,
+    spawner: &LocalSpawner,
+    reactor: &Rc<FakeReactor>,
+    stats: &Rc<Stats>,
+) -> Result<(), io::Error> {
+    let listener = AsyncFakeListener::new(reactor, stats.clone());
+
+    for _ in 0..CONNS_MAX {
+        let stream = listener.accept().await?;
+
+        *task_count.borrow_mut() += 1;
+
+        spawner
+            .spawn_local(do_async_frs(
+                task_count.clone(),
+                spawner.clone(),
+                reactor.clone(),
+                stats.clone(),
+                AsyncInvoke2::Connection(stream),
+            ))
+            .unwrap();
+    }
+
+    *task_count.borrow_mut() -= 1;
+
+    Ok(())
+}
+
+enum AsyncInvoke2 {
+    Listen,
+    Connection(AsyncFakeStream),
+}
+
+async fn do_async_frs(
+    task_count: Rc<RefCell<usize>>,
+    spawner: LocalSpawner,
+    reactor: Rc<FakeReactor>,
+    stats: Rc<Stats>,
+    invoke: AsyncInvoke2,
+) {
+    match invoke {
+        AsyncInvoke2::Listen => listen2(task_count, &spawner, &reactor, &stats)
+            .await
+            .unwrap(),
+        AsyncInvoke2::Connection(stream) => connection(task_count, stream).await.unwrap(),
+    }
+}
+
+pub fn run_async_frs(prealloc: &AsyncPrealloc) {
+    let mut pool = LocalPool::new();
+    let spawner = pool.spawner();
+
+    *prealloc.task_count.borrow_mut() += 1;
+
+    spawner
+        .spawn_local(do_async_frs(
+            prealloc.task_count.clone(),
+            spawner.clone(),
+            prealloc.reactor.clone(),
+            prealloc.stats.clone(),
+            AsyncInvoke2::Listen,
+        ))
+        .unwrap();
+
+    loop {
+        pool.run_until_stalled();
+
+        if *prealloc.task_count.borrow() == 0 {
+            // all tasks claim to be finished. let's blocking run to be sure
+            pool.run();
+
+            break;
+        }
+
+        prealloc.reactor.poll().unwrap();
+    }
 }

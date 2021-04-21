@@ -2,6 +2,7 @@ use slab::Slab;
 use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::io;
+use std::rc::Rc;
 
 #[derive(Debug)]
 struct StatsMetrics {
@@ -140,14 +141,14 @@ pub trait Evented {
     fn get_poll_index(&self) -> Option<usize>;
 }
 
-pub struct FakeStream<'s> {
+pub struct FakeStream {
     poll_index: Cell<Option<usize>>,
-    stats: &'s Stats,
+    stats: Rc<Stats>,
     calls: usize,
 }
 
-impl<'s> FakeStream<'s> {
-    fn new(stats: &'s Stats) -> Self {
+impl FakeStream {
+    fn new(stats: Rc<Stats>) -> Self {
         Self {
             poll_index: Cell::new(None),
             stats,
@@ -156,7 +157,7 @@ impl<'s> FakeStream<'s> {
     }
 }
 
-impl io::Read for FakeStream<'_> {
+impl io::Read for FakeStream {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, io::Error> {
         self.stats.inc_read();
 
@@ -176,7 +177,7 @@ impl io::Read for FakeStream<'_> {
     }
 }
 
-impl io::Write for FakeStream<'_> {
+impl io::Write for FakeStream {
     fn write(&mut self, buf: &[u8]) -> Result<usize, io::Error> {
         self.stats.inc_write();
 
@@ -194,7 +195,7 @@ impl io::Write for FakeStream<'_> {
     }
 }
 
-impl Evented for FakeStream<'_> {
+impl Evented for FakeStream {
     fn set_poll_index(&self, index: Option<usize>) {
         self.poll_index.set(index);
     }
@@ -204,14 +205,14 @@ impl Evented for FakeStream<'_> {
     }
 }
 
-pub struct FakeListener<'s> {
+pub struct FakeListener {
     poll_index: Cell<Option<usize>>,
-    stats: &'s Stats,
+    stats: Rc<Stats>,
     calls: RefCell<usize>,
 }
 
-impl<'s> FakeListener<'s> {
-    pub fn new(stats: &'s Stats) -> Self {
+impl FakeListener {
+    pub fn new(stats: Rc<Stats>) -> Self {
         Self {
             poll_index: Cell::new(None),
             stats,
@@ -227,12 +228,12 @@ impl<'s> FakeListener<'s> {
         if *self.calls.borrow() % 2 == 1 {
             Err(io::Error::from(io::ErrorKind::WouldBlock))
         } else {
-            Ok(FakeStream::new(&self.stats))
+            Ok(FakeStream::new(self.stats.clone()))
         }
     }
 }
 
-impl Evented for FakeListener<'_> {
+impl Evented for FakeListener {
     fn set_poll_index(&self, index: Option<usize>) {
         self.poll_index.set(index);
     }
@@ -245,13 +246,13 @@ impl Evented for FakeListener<'_> {
 pub const READABLE: u8 = 1;
 pub const WRITABLE: u8 = 2;
 
-pub struct Poll<'s> {
-    stats: &'s Stats,
+pub struct Poll {
+    stats: Rc<Stats>,
     items: RefCell<Slab<(u8, usize)>>,
 }
 
-impl<'s> Poll<'s> {
-    pub fn new(capacity: usize, stats: &'s Stats) -> Self {
+impl Poll {
+    pub fn new(capacity: usize, stats: Rc<Stats>) -> Self {
         Self {
             stats,
             items: RefCell::new(Slab::with_capacity(capacity)),
@@ -287,7 +288,7 @@ impl<'s> Poll<'s> {
     }
 }
 
-impl Drop for Poll<'_> {
+impl Drop for Poll {
     fn drop(&mut self) {
         // confirm all i/o objects were unregistered
         assert!(self.items.borrow().is_empty());
