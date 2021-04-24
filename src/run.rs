@@ -160,7 +160,7 @@ pub fn run_sync(stats: &Stats) {
 }
 
 async fn listen(
-    spawn: fn(*const (), *const (), usize) -> Result<(), ()>,
+    spawn: unsafe fn(*const (), *const (), usize) -> Result<(), ()>,
     ctx: *const (),
     reactor: &FakeReactor<'_>,
     stats: &Stats,
@@ -171,7 +171,9 @@ async fn listen(
         let stream = listener.accept().await?;
 
         let f = do_async(spawn, ctx, reactor, stats, AsyncInvoke::Connection(stream));
-        spawn(ctx, &f as *const _ as *const (), mem::size_of_val(&f)).unwrap();
+
+        unsafe { spawn(ctx, &f as *const _ as *const (), mem::size_of_val(&f)).unwrap() };
+
         mem::forget(f);
     }
 
@@ -203,7 +205,7 @@ enum AsyncInvoke<'r, 's> {
 }
 
 async fn do_async(
-    spawn: fn(*const (), *const (), usize) -> Result<(), ()>,
+    spawn: unsafe fn(*const (), *const (), usize) -> Result<(), ()>,
     ctx: *const (),
     reactor: &FakeReactor<'_>,
     stats: &Stats,

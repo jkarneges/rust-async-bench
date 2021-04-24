@@ -226,46 +226,35 @@ where
     }
 
     pub fn spawn(&self, f: F) -> Result<(), ()> {
+        let key = self.create_task()?;
+
         let tasks = &mut *self.tasks.borrow_mut();
 
-        if tasks.nodes.len() == tasks.nodes.capacity() {
-            return Err(());
-        }
-
-        let entry = tasks.nodes.vacant_entry();
-        let key = entry.key();
-
-        let waker = SharedWaker {
-            executor: self,
-            task_id: key,
-        };
-
-        let task = Task {
-            fut: Some(f),
-            waker,
-            waker_refs: 0,
-            awake: true,
-        };
-
-        entry.insert(list::Node::new(task));
-
-        tasks.next.push_back(&mut tasks.nodes, key);
+        tasks.nodes[key].value.fut = Some(f);
 
         Ok(())
     }
 
-    pub fn get_spawn_blob(&self) -> fn(*const (), *const (), usize) -> Result<(), ()> {
+    unsafe fn spawn_ptr(&self, f: *const F) -> Result<(), ()> {
+        let key = self.create_task()?;
+
+        let tasks = &mut *self.tasks.borrow_mut();
+
+        tasks.nodes[key].value.fut = Some(ptr::read(f));
+
+        Ok(())
+    }
+
+    pub fn get_spawn_blob(&self) -> unsafe fn(*const (), *const (), usize) -> Result<(), ()> {
         Self::spawn_blob
     }
 
-    pub fn spawn_blob(ctx: *const (), ptr: *const (), size: usize) -> Result<(), ()> {
-        let executor = unsafe { (ctx as *const Executor<R, F>).as_ref().unwrap() };
+    pub unsafe fn spawn_blob(ctx: *const (), ptr: *const (), size: usize) -> Result<(), ()> {
+        let executor = { (ctx as *const Executor<R, F>).as_ref().unwrap() };
 
         assert_eq!(size, mem::size_of::<F>());
 
-        let f = unsafe { ptr::read(ptr as *const F) };
-
-        executor.spawn(f)
+        executor.spawn_ptr(ptr as *const F)
     }
 
     pub fn exec(&self) {
@@ -328,6 +317,35 @@ where
 
             self.reactor.poll().unwrap();
         }
+    }
+
+    fn create_task(&self) -> Result<usize, ()> {
+        let tasks = &mut *self.tasks.borrow_mut();
+
+        if tasks.nodes.len() == tasks.nodes.capacity() {
+            return Err(());
+        }
+
+        let entry = tasks.nodes.vacant_entry();
+        let key = entry.key();
+
+        let waker = SharedWaker {
+            executor: self,
+            task_id: key,
+        };
+
+        let task = Task {
+            fut: None,
+            waker,
+            waker_refs: 0,
+            awake: true,
+        };
+
+        entry.insert(list::Node::new(task));
+
+        tasks.next.push_back(&mut tasks.nodes, key);
+
+        Ok(key)
     }
 
     fn add_waker_ref(&self, task_id: usize) {
