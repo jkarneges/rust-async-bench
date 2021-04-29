@@ -240,7 +240,10 @@ where
 
         let tasks = &mut *self.tasks.borrow_mut();
 
-        tasks.nodes[key].value.fut = Some(ptr::read(f));
+        let task = &mut tasks.nodes[key].value;
+
+        task.fut = Some(mem::MaybeUninit::uninit().assume_init());
+        ptr::copy_nonoverlapping(f, task.fut.as_mut().unwrap() as *mut F, 1);
 
         Ok(())
     }
