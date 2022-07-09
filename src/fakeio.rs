@@ -169,7 +169,7 @@ impl io::Read for FakeStream<'_> {
 
             assert!(buf.len() >= data.len());
 
-            &mut buf[..data.len()].copy_from_slice(&data);
+            buf[..data.len()].copy_from_slice(&data);
 
             Ok(data.len())
         }
@@ -227,7 +227,7 @@ impl<'s> FakeListener<'s> {
         if *self.calls.borrow() % 2 == 1 {
             Err(io::Error::from(io::ErrorKind::WouldBlock))
         } else {
-            Ok(FakeStream::new(&self.stats))
+            Ok(FakeStream::new(self.stats))
         }
     }
 }
