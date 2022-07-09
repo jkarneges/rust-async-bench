@@ -219,7 +219,7 @@ impl<'s> FakeListener<'s> {
         }
     }
 
-    pub fn accept(&self) -> Result<FakeStream, io::Error> {
+    pub fn accept(&self) -> Result<FakeStream<'s>, io::Error> {
         self.stats.inc_accept();
 
         *self.calls.borrow_mut() += 1;
