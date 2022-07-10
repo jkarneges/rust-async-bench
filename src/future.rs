@@ -90,11 +90,11 @@ impl<'s> FakeReactor<'s> {
         }
     }
 
-    fn register<E: Evented>(
-        &self,
+    fn register<'a, E: Evented>(
+        &'a self,
         handle: &E,
         interest: u8,
-    ) -> Result<RegistrationHandle, io::Error> {
+    ) -> Result<RegistrationHandle<'a, 's>, io::Error> {
         let data = &mut *self.data.borrow_mut();
 
         if data.registrations.len() == data.registrations.capacity() {
@@ -388,7 +388,7 @@ pub struct AsyncFakeStream<'r, 's> {
     handle: RegistrationHandle<'r, 's>,
 }
 
-impl<'r: 's, 's> AsyncFakeStream<'r, 's> {
+impl<'r, 's: 'r> AsyncFakeStream<'r, 's> {
     pub fn new(s: FakeStream<'s>, reactor: &'r FakeReactor<'s>) -> Self {
         let handle = reactor.register(&s, READABLE | WRITABLE).unwrap();
 
@@ -417,7 +417,7 @@ pub struct AsyncFakeListener<'r, 's> {
     handle: RegistrationHandle<'r, 's>,
 }
 
-impl<'r: 's, 's> AsyncFakeListener<'r, 's> {
+impl<'r, 's: 'r> AsyncFakeListener<'r, 's> {
     pub fn new(reactor: &'r FakeReactor<'s>, stats: &'s Stats) -> Self {
         let l = FakeListener::new(stats);
 
@@ -513,7 +513,7 @@ pub struct AcceptFuture<'a, 'r, 's> {
     l: &'a AsyncFakeListener<'r, 's>,
 }
 
-impl<'a: 's, 'r, 's> Future for AcceptFuture<'a, 'r, 's> {
+impl<'a, 'r, 's: 'a> Future for AcceptFuture<'a, 'r, 's> {
     type Output = Result<AsyncFakeStream<'r, 's>, io::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
