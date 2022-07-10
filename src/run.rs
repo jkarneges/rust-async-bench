@@ -1,10 +1,9 @@
 use crate::fakeio::{FakeListener, FakeStream, Poll, Stats, READABLE, WRITABLE};
-use crate::future::{AsyncFakeListener, AsyncFakeStream, Executor, FakeReactor};
+use crate::future::{AsyncFakeListener, AsyncFakeStream, Executor, FakeReactor, Spawner};
 use crate::list;
 use slab::Slab;
 use std::io;
 use std::io::{Read, Write};
-use std::mem;
 
 const CONNS_MAX: usize = 32;
 
@@ -159,22 +158,17 @@ pub fn run_sync(stats: &Stats) {
     poll.unregister(&listener);
 }
 
-async fn listen(
-    spawn: unsafe fn(*const (), *const (), usize) -> Result<(), ()>,
-    ctx: *const (),
-    reactor: &FakeReactor<'_>,
-    stats: &Stats,
+async fn listen<'r, 's: 'r>(
+    spawner: &'r Spawner<AsyncInvoke<'r, 's>>,
+    reactor: &'r FakeReactor<'s>,
+    stats: &'s Stats,
 ) -> Result<(), io::Error> {
     let listener = AsyncFakeListener::new(reactor, stats);
 
     for _ in 0..CONNS_MAX {
         let stream = listener.accept().await?;
 
-        let f = do_async(spawn, ctx, reactor, stats, AsyncInvoke::Connection(stream));
-
-        unsafe { spawn(ctx, &f as *const _ as *const (), mem::size_of_val(&f)).unwrap() };
-
-        mem::forget(f);
+        spawner.spawn(AsyncInvoke::Connection(stream)).unwrap();
     }
 
     Ok(())
@@ -204,15 +198,14 @@ enum AsyncInvoke<'r, 's> {
     Connection(AsyncFakeStream<'r, 's>),
 }
 
-async fn do_async(
-    spawn: unsafe fn(*const (), *const (), usize) -> Result<(), ()>,
-    ctx: *const (),
-    reactor: &FakeReactor<'_>,
-    stats: &Stats,
-    invoke: AsyncInvoke<'_, '_>,
+async fn do_async<'r, 's: 'r>(
+    spawner: &'r Spawner<AsyncInvoke<'r, 's>>,
+    reactor: &'r FakeReactor<'s>,
+    stats: &'s Stats,
+    invoke: AsyncInvoke<'r, 's>,
 ) {
     match invoke {
-        AsyncInvoke::Listen => listen(spawn, ctx, reactor, stats).await.unwrap(),
+        AsyncInvoke::Listen => listen(spawner, reactor, stats).await.unwrap(),
         AsyncInvoke::Connection(stream) => connection(stream).await.unwrap(),
     }
 }
@@ -220,19 +213,15 @@ async fn do_async(
 pub fn run_async(stats: &Stats) {
     let reactor = FakeReactor::new(CONNS_MAX + 1, &stats);
 
-    let executor = Executor::new(&reactor, CONNS_MAX + 1);
+    let spawner = Spawner::new();
 
-    let ctx = &executor as *const Executor<_, _> as *const ();
+    let executor = Executor::new(&reactor, CONNS_MAX + 1, |invoke| {
+        do_async(&spawner, &reactor, stats, invoke)
+    });
 
-    executor
-        .spawn(do_async(
-            executor.get_spawn_blob(),
-            ctx,
-            &reactor,
-            &stats,
-            AsyncInvoke::Listen,
-        ))
-        .unwrap();
+    executor.set_spawner(&spawner);
+
+    spawner.spawn(AsyncInvoke::Listen).unwrap();
 
     executor.exec();
 }

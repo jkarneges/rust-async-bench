@@ -6,9 +6,7 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::io;
 use std::io::{Read, Write};
-use std::mem;
 use std::pin::Pin;
-use std::ptr;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 pub trait Reactor {
@@ -136,15 +134,16 @@ impl Reactor for FakeReactor<'_> {
     }
 }
 
-struct SharedWaker<'r, R, F> {
-    executor: *const Executor<'r, R, F>,
+struct SharedWaker<'r, R, F, A, S> {
+    executor: *const Executor<'r, R, F, A, S>,
     task_id: usize,
 }
 
-impl<'r, R: 'r, F> SharedWaker<'r, R, F>
+impl<'r, R: 'r, F, A: 'r, S> SharedWaker<'r, R, F, A, S>
 where
     R: Reactor,
     F: Future<Output = ()>,
+    S: Fn(A) -> F,
 {
     unsafe fn as_std_waker(&self) -> Waker {
         let executor = self.executor.as_ref().unwrap();
@@ -193,35 +192,64 @@ where
     }
 }
 
-struct Task<'r, R, F> {
+struct Task<'r, R, F, A, S> {
     fut: Option<F>,
-    waker: SharedWaker<'r, R, F>,
+    waker: SharedWaker<'r, R, F, A, S>,
     waker_refs: usize,
     awake: bool,
 }
 
-struct Tasks<'r, R, F> {
-    nodes: Slab<list::Node<Task<'r, R, F>>>,
+struct Tasks<'r, R, F, A, S> {
+    nodes: Slab<list::Node<Task<'r, R, F, A, S>>>,
     next: list::List,
+    spawn_fn: S,
 }
 
-pub struct Executor<'r, R, F> {
+struct SpawnerData<A> {
+    ctx: *const (),
+    spawn_fn: unsafe fn(*const (), A) -> Result<(), ()>,
+}
+
+pub struct Spawner<A> {
+    data: RefCell<Option<SpawnerData<A>>>,
+}
+
+impl<A> Spawner<A> {
+    pub fn new() -> Self {
+        Self {
+            data: RefCell::new(None),
+        }
+    }
+
+    pub fn spawn(&self, arg: A) -> Result<(), ()> {
+        match &*self.data.borrow() {
+            Some(data) => unsafe { (data.spawn_fn)(data.ctx, arg) },
+            None => Err(()),
+        }
+    }
+}
+
+pub struct Executor<'r, R, F, A, S> {
     reactor: &'r R,
-    tasks: RefCell<Tasks<'r, R, F>>,
+    tasks: RefCell<Tasks<'r, R, F, A, S>>,
+    spawner: RefCell<Option<&'r Spawner<A>>>,
 }
 
-impl<'r, R: 'r, F> Executor<'r, R, F>
+impl<'r, R: 'r, F, A: 'r, S> Executor<'r, R, F, A, S>
 where
     R: Reactor,
     F: Future<Output = ()>,
+    S: Fn(A) -> F,
 {
-    pub fn new(reactor: &'r R, tasks_max: usize) -> Self {
+    pub fn new(reactor: &'r R, tasks_max: usize, spawn_fn: S) -> Self {
         Self {
             reactor,
             tasks: RefCell::new(Tasks {
                 nodes: Slab::with_capacity(tasks_max),
                 next: list::List::default(),
+                spawn_fn,
             }),
+            spawner: RefCell::new(None),
         }
     }
 
@@ -235,29 +263,32 @@ where
         Ok(())
     }
 
-    unsafe fn spawn_ptr(&self, f: *const F) -> Result<(), ()> {
+    pub fn spawn_by_arg(&self, arg: A) -> Result<(), ()> {
         let key = self.create_task()?;
 
         let tasks = &mut *self.tasks.borrow_mut();
 
-        let task = &mut tasks.nodes[key].value;
-
-        task.fut = Some(mem::MaybeUninit::uninit().assume_init());
-        ptr::copy_nonoverlapping(f, task.fut.as_mut().unwrap() as *mut F, 1);
+        tasks.nodes[key].value.fut = Some((tasks.spawn_fn)(arg));
 
         Ok(())
     }
 
-    pub fn get_spawn_blob(&self) -> unsafe fn(*const (), *const (), usize) -> Result<(), ()> {
-        Self::spawn_blob
+    pub fn set_spawner(&self, spawner: &'r Spawner<A>) {
+        *self.spawner.borrow_mut() = Some(spawner);
+
+        let mut spawner = self.spawner.borrow_mut();
+        let spawner = spawner.as_mut().unwrap();
+
+        *spawner.data.borrow_mut() = Some(SpawnerData {
+            ctx: self as *const Self as *const (),
+            spawn_fn: Self::spawn_by_arg_fn,
+        });
     }
 
-    pub unsafe fn spawn_blob(ctx: *const (), ptr: *const (), size: usize) -> Result<(), ()> {
-        let executor = { (ctx as *const Executor<R, F>).as_ref().unwrap() };
+    unsafe fn spawn_by_arg_fn(ctx: *const (), arg: A) -> Result<(), ()> {
+        let executor = { (ctx as *const Executor<R, F, A, S>).as_ref().unwrap() };
 
-        assert_eq!(size, mem::size_of::<F>());
-
-        executor.spawn_ptr(ptr as *const F)
+        executor.spawn_by_arg(arg)
     }
 
     pub fn exec(&self) {
@@ -277,7 +308,7 @@ where
 
                     task.awake = false;
 
-                    (nkey, task as *mut Task<R, F>)
+                    (nkey, task as *mut Task<R, F, A, S>)
                 };
 
                 // task won't move/drop while this pointer is in use
@@ -379,6 +410,14 @@ where
 
             tasks.next.remove(&mut tasks.nodes, task_id);
             tasks.next.push_back(&mut tasks.nodes, task_id);
+        }
+    }
+}
+
+impl<'r, R: 'r, F, A: 'r, S> Drop for Executor<'r, R, F, A, S> {
+    fn drop(&mut self) {
+        if let Some(spawner) = &mut *self.spawner.borrow_mut() {
+            *spawner.data.borrow_mut() = None;
         }
     }
 }
