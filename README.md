@@ -39,7 +39,7 @@ The non-async benchmarks win, and the async engine in this project is borderline
 
 * The cost is only some in-app state and function calls. Async Rust does not require heap allocations, threading primitives, or other conventionally costly operations. The number of system calls can be kept the same as a poll loop. This is the most meaningful finding, as many async runtimes in other programming languages are unable to provide the same level of cost control.
 
-* The cost of doing anything meaningful in an application will likely dwarf the cost of async execution. For example, merely adding bogus system calls closes the gap between the benchmarks considerably, with the non-async implementation being only 9% faster.
+* The cost of doing real work in an application will likely dwarf the cost of async execution. For example, merely adding bogus system calls closes the gap between the benchmarks considerably, with the non-async implementation being only 9% faster.
 
 * The benchmarks test 32 requests. The difference between the async and non-async syscall benchmarks is 12.1us. Divided by 32, that's an overhead of around 377ns per request. In a server app, that's practically free. For comparison, `Box::new(mem::MaybeUninit::<[u8; 16384]>::uninit())` on the same machine takes 465ns.
 
@@ -53,7 +53,7 @@ There are two kinds of tasks to perform: accept connections and process connecti
 
 Both versions of the application can be run with or without syscalls. When syscalls are enabled, `libc::read` is called on an empty pipe every time there would have been an I/O operation.
 
-It is relatively straightforward to write a single-threaded poll loop server that doesn't use heap allocations or synchronization primitives. Doing the same with async/await, and doing it without making extra syscalls, is a bit trickier. The following techniques are used in the async implementation:
+It is relatively straightforward to write a single-threaded poll loop server that doesn't use heap allocations or threading primitives. Doing the same with async/await, and doing it without making extra syscalls, is a bit trickier. The following techniques are used in the async implementation:
 
 * I/O objects register/unregister with the poller when they are initialized/dropped as opposed to when I/O futures are used. They also keep track of their readiness state at all times. This helps reduce the overhead of the I/O futures. For example, if a stream is known to be not readable and `read()` is called on it, the returned future will immediately return `Pending` when polled, without performing a syscall.
 
