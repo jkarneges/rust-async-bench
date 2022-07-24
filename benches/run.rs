@@ -1,14 +1,15 @@
 use criterion::{criterion_group, criterion_main, Criterion};
+use rust_async_bench::executor::{Executor, Spawner};
 use rust_async_bench::fakeio::Stats;
-use rust_async_bench::future::{Executor, FakeReactor, Spawner};
-use rust_async_bench::run::{do_async, AsyncInvoke, RunSync, CONNS_MAX};
+use rust_async_bench::future::FakeReactor;
+use rust_async_bench::run::{do_async, AsyncInvoke, RunManual, CONNS_MAX};
 
 fn criterion_benchmark(c: &mut Criterion) {
     {
         let stats = Stats::new(false);
-        let mut r = RunSync::new(&stats);
+        let mut r = RunManual::new(&stats);
 
-        c.bench_function("run_sync", |b| b.iter(|| r.run()));
+        c.bench_function("manual", |b| b.iter(|| r.run()));
     }
 
     {
@@ -20,7 +21,7 @@ fn criterion_benchmark(c: &mut Criterion) {
         });
         executor.set_spawner(&spawner);
 
-        c.bench_function("run_async", |b| {
+        c.bench_function("async", |b| {
             b.iter(|| {
                 spawner.spawn(AsyncInvoke::Listen).unwrap();
                 executor.exec();
@@ -30,9 +31,9 @@ fn criterion_benchmark(c: &mut Criterion) {
 
     {
         let stats = Stats::new(true);
-        let mut r = RunSync::new(&stats);
+        let mut r = RunManual::new(&stats);
 
-        c.bench_function("run_sync_with_syscalls", |b| b.iter(|| r.run()));
+        c.bench_function("manual+syscalls", |b| b.iter(|| r.run()));
     }
 
     {
@@ -44,7 +45,7 @@ fn criterion_benchmark(c: &mut Criterion) {
         });
         executor.set_spawner(&spawner);
 
-        c.bench_function("run_async_with_syscalls", |b| {
+        c.bench_function("async+syscalls", |b| {
             b.iter(|| {
                 spawner.spawn(AsyncInvoke::Listen).unwrap();
                 executor.exec();

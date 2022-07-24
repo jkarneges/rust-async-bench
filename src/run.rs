@@ -1,5 +1,6 @@
+use crate::executor::{Executor, Spawner};
 use crate::fakeio::{FakeListener, FakeStream, Poll, Stats, READABLE, WRITABLE};
-use crate::future::{AsyncFakeListener, AsyncFakeStream, Executor, FakeReactor, Spawner};
+use crate::future::{AsyncFakeListener, AsyncFakeStream, FakeReactor};
 use crate::list;
 use slab::Slab;
 use std::io;
@@ -63,14 +64,14 @@ impl Connection<'_> {
     }
 }
 
-pub struct RunSync<'s, 'a> {
+pub struct RunManual<'s, 'a> {
     stats: &'s Stats,
     poll: Poll<'s>,
     events: Slab<(usize, u8)>,
     conns: Slab<list::Node<Connection<'a>>>,
 }
 
-impl<'s: 'a, 'a> RunSync<'s, 'a> {
+impl<'s: 'a, 'a> RunManual<'s, 'a> {
     pub fn new(stats: &'s Stats) -> Self {
         let poll = Poll::new(CONNS_MAX + 1, stats);
         let events = Slab::with_capacity(CONNS_MAX + 1);
@@ -179,8 +180,8 @@ impl<'s: 'a, 'a> RunSync<'s, 'a> {
     }
 }
 
-pub fn run_sync(stats: &Stats) {
-    RunSync::new(stats).run()
+pub fn run_manual(stats: &Stats) {
+    RunManual::new(stats).run()
 }
 
 async fn listen<'r, 's: 'r>(
