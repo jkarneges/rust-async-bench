@@ -5,7 +5,7 @@ use slab::Slab;
 use std::io;
 use std::io::{Read, Write};
 
-const CONNS_MAX: usize = 32;
+pub const CONNS_MAX: usize = 32;
 
 enum ConnectionState {
     ReceivingRequest,
@@ -63,99 +63,124 @@ impl Connection<'_> {
     }
 }
 
-pub fn run_sync(stats: &Stats) {
-    let poll = Poll::new(CONNS_MAX + 1, &stats);
+pub struct RunSync<'s, 'a> {
+    stats: &'s Stats,
+    poll: Poll<'s>,
+    events: Slab<(usize, u8)>,
+    conns: Slab<list::Node<Connection<'a>>>,
+}
 
-    let mut events = Slab::with_capacity(CONNS_MAX + 1);
+impl<'s: 'a, 'a> RunSync<'s, 'a> {
+    pub fn new(stats: &'s Stats) -> Self {
+        let poll = Poll::new(CONNS_MAX + 1, stats);
+        let events = Slab::with_capacity(CONNS_MAX + 1);
+        let conns = Slab::with_capacity(CONNS_MAX);
 
-    let listener = FakeListener::new(&stats);
-
-    poll.register(&listener, 0, READABLE);
-
-    let mut conns: Slab<list::Node<Connection>> = Slab::with_capacity(CONNS_MAX);
-    let mut needs_process = list::List::default();
-
-    let mut can_accept = true;
-
-    let mut accept_left = CONNS_MAX;
-
-    loop {
-        while accept_left > 0 && can_accept {
-            match listener.accept() {
-                Ok(stream) => {
-                    accept_left -= 1;
-
-                    let key = conns.insert(list::Node::new(Connection {
-                        stream,
-                        can_read: true,
-                        can_write: true,
-                        state: ConnectionState::ReceivingRequest,
-                        buf: [0; 128],
-                        buf_len: 0,
-                        sent: 0,
-                    }));
-
-                    let c = &mut conns[key].value;
-
-                    poll.register(&c.stream, key + 1, READABLE | WRITABLE);
-
-                    needs_process.push_back(&mut conns, key);
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => can_accept = false,
-                _ => unreachable!(),
-            }
-        }
-
-        let mut next = needs_process.head;
-
-        while let Some(key) = next {
-            needs_process.remove(&mut conns, key);
-
-            let c = &mut conns[key].value;
-            if c.process() {
-                poll.unregister(&c.stream);
-
-                conns.remove(key);
-            }
-
-            next = needs_process.head;
-        }
-
-        if accept_left == 0 && conns.len() == 0 {
-            break;
-        }
-
-        poll.poll(&mut events);
-
-        for (_, &(key, state)) in events.iter() {
-            if key == 0 {
-                can_accept = true;
-            } else {
-                let key = key - 1;
-
-                let c = &mut conns[key].value;
-
-                let mut do_process = false;
-
-                if state & READABLE != 0 {
-                    c.can_read = true;
-                    do_process = true;
-                }
-
-                if state & WRITABLE != 0 {
-                    c.can_write = true;
-                    do_process = true;
-                }
-
-                if do_process {
-                    needs_process.remove(&mut conns, key);
-                    needs_process.push_back(&mut conns, key);
-                }
-            }
+        Self {
+            stats,
+            poll,
+            events,
+            conns,
         }
     }
 
-    poll.unregister(&listener);
+    pub fn run(&mut self) {
+        let poll = &mut self.poll;
+        let events = &mut self.events;
+        let conns = &mut self.conns;
+
+        let mut needs_process = list::List::default();
+
+        let listener = FakeListener::new(self.stats);
+
+        poll.register(&listener, 0, READABLE);
+
+        let mut can_accept = true;
+
+        let mut accept_left = CONNS_MAX;
+
+        loop {
+            while accept_left > 0 && can_accept {
+                match listener.accept() {
+                    Ok(stream) => {
+                        accept_left -= 1;
+
+                        let key = conns.insert(list::Node::new(Connection {
+                            stream,
+                            can_read: true,
+                            can_write: true,
+                            state: ConnectionState::ReceivingRequest,
+                            buf: [0; 128],
+                            buf_len: 0,
+                            sent: 0,
+                        }));
+
+                        let c = &mut conns[key].value;
+
+                        poll.register(&c.stream, key + 1, READABLE | WRITABLE);
+
+                        needs_process.push_back(conns, key);
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => can_accept = false,
+                    _ => unreachable!(),
+                }
+            }
+
+            let mut next = needs_process.head;
+
+            while let Some(key) = next {
+                needs_process.remove(conns, key);
+
+                let c = &mut conns[key].value;
+                if c.process() {
+                    poll.unregister(&c.stream);
+
+                    conns.remove(key);
+                }
+
+                next = needs_process.head;
+            }
+
+            if accept_left == 0 && conns.len() == 0 {
+                break;
+            }
+
+            poll.poll(events);
+
+            for (_, &(key, state)) in events.iter() {
+                if key == 0 {
+                    can_accept = true;
+                } else {
+                    let key = key - 1;
+
+                    let c = &mut conns[key].value;
+
+                    let mut do_process = false;
+
+                    if state & READABLE != 0 {
+                        c.can_read = true;
+                        do_process = true;
+                    }
+
+                    if state & WRITABLE != 0 {
+                        c.can_write = true;
+                        do_process = true;
+                    }
+
+                    if do_process {
+                        needs_process.remove(conns, key);
+                        needs_process.push_back(conns, key);
+                    }
+                }
+            }
+        }
+
+        poll.unregister(&listener);
+    }
+}
+
+pub fn run_sync(stats: &Stats) {
+    RunSync::new(stats).run()
 }
 
 async fn listen<'r, 's: 'r>(
@@ -193,12 +218,12 @@ async fn connection(mut stream: AsyncFakeStream<'_, '_>) -> Result<(), io::Error
     Ok(())
 }
 
-enum AsyncInvoke<'r, 's> {
+pub enum AsyncInvoke<'r, 's> {
     Listen,
     Connection(AsyncFakeStream<'r, 's>),
 }
 
-async fn do_async<'r, 's: 'r>(
+pub async fn do_async<'r, 's: 'r>(
     spawner: &'r Spawner<AsyncInvoke<'r, 's>>,
     reactor: &'r FakeReactor<'s>,
     stats: &'s Stats,
@@ -211,7 +236,7 @@ async fn do_async<'r, 's: 'r>(
 }
 
 pub fn run_async(stats: &Stats) {
-    let reactor = FakeReactor::new(CONNS_MAX + 1, &stats);
+    let reactor = FakeReactor::new(CONNS_MAX + 1, stats);
 
     let spawner = Spawner::new();
 
