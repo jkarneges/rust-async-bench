@@ -1,138 +1,18 @@
 use slab::Slab;
 use std::cell::{Cell, RefCell};
-use std::fmt;
 use std::io;
 
-#[derive(Debug)]
-struct StatsMetrics {
-    register: usize,
-    unregister: usize,
-    poll: usize,
-    accept: usize,
-    read: usize,
-    write: usize,
+pub enum StatsType {
+    Register,
+    Unregister,
+    Poll,
+    Accept,
+    Read,
+    Write,
 }
 
-struct StatsData {
-    metrics: StatsMetrics,
-    pipe_fds: Option<[libc::c_int; 2]>,
-}
-
-impl StatsData {
-    fn new(syscalls: bool) -> Self {
-        let pipe_fds = if syscalls {
-            let mut pipe_fds: [libc::c_int; 2] = [0; 2];
-
-            let ret = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) };
-            assert_eq!(ret, 0);
-
-            let ret = unsafe { libc::fcntl(pipe_fds[0], libc::F_SETFL, libc::O_NONBLOCK) };
-            assert_eq!(ret, 0);
-
-            Some(pipe_fds)
-        } else {
-            None
-        };
-
-        Self {
-            metrics: StatsMetrics {
-                register: 0,
-                unregister: 0,
-                poll: 0,
-                accept: 0,
-                read: 0,
-                write: 0,
-            },
-            pipe_fds,
-        }
-    }
-
-    fn do_call(&mut self) {
-        if let Some(fds) = &self.pipe_fds {
-            let mut dest: [u8; 1] = [0; 1];
-
-            let ret = unsafe { libc::read(fds[0], dest.as_mut_ptr() as *mut libc::c_void, 1) };
-            assert_eq!(ret, -1);
-        }
-    }
-}
-
-impl Drop for StatsData {
-    fn drop(&mut self) {
-        if let Some(fds) = &self.pipe_fds {
-            let ret = unsafe { libc::close(fds[0]) };
-            assert_eq!(ret, 0);
-
-            let ret = unsafe { libc::close(fds[1]) };
-            assert_eq!(ret, 0);
-        }
-    }
-}
-
-pub struct Stats {
-    data: RefCell<StatsData>,
-}
-
-impl Stats {
-    pub fn new(syscalls: bool) -> Self {
-        Self {
-            data: RefCell::new(StatsData::new(syscalls)),
-        }
-    }
-
-    fn inc_register(&self) {
-        let data = &mut *self.data.borrow_mut();
-
-        data.do_call();
-        data.metrics.register += 1;
-    }
-
-    fn inc_unregister(&self) {
-        let data = &mut *self.data.borrow_mut();
-
-        data.do_call();
-        data.metrics.unregister += 1;
-    }
-
-    fn inc_poll(&self) {
-        let data = &mut *self.data.borrow_mut();
-
-        data.do_call();
-        data.metrics.poll += 1;
-    }
-
-    fn inc_accept(&self) {
-        let data = &mut *self.data.borrow_mut();
-
-        data.do_call();
-        data.metrics.accept += 1;
-    }
-
-    fn inc_read(&self) {
-        let data = &mut *self.data.borrow_mut();
-
-        data.do_call();
-        data.metrics.read += 1;
-    }
-
-    fn inc_write(&self) {
-        let data = &mut *self.data.borrow_mut();
-
-        data.do_call();
-        data.metrics.write += 1;
-    }
-}
-
-impl fmt::Display for Stats {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let m = &self.data.borrow().metrics;
-
-        write!(
-            f,
-            "register={} unregister={} poll={} accept={} read={} write={}",
-            m.register, m.unregister, m.poll, m.accept, m.read, m.write
-        )
-    }
+pub trait Stats {
+    fn inc(&self, t: StatsType);
 }
 
 pub trait Evented {
@@ -140,14 +20,20 @@ pub trait Evented {
     fn get_poll_index(&self) -> Option<usize>;
 }
 
-pub struct FakeStream<'s> {
+pub struct FakeStream<T>
+where
+    T: Stats,
+{
     poll_index: Cell<Option<usize>>,
-    stats: &'s Stats,
+    stats: T,
     calls: usize,
 }
 
-impl<'s> FakeStream<'s> {
-    fn new(stats: &'s Stats) -> Self {
+impl<T> FakeStream<T>
+where
+    T: Stats,
+{
+    fn new(stats: T) -> Self {
         Self {
             poll_index: Cell::new(None),
             stats,
@@ -156,9 +42,12 @@ impl<'s> FakeStream<'s> {
     }
 }
 
-impl io::Read for FakeStream<'_> {
+impl<T> io::Read for FakeStream<T>
+where
+    T: Stats,
+{
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, io::Error> {
-        self.stats.inc_read();
+        self.stats.inc(StatsType::Read);
 
         self.calls += 1;
 
@@ -176,9 +65,12 @@ impl io::Read for FakeStream<'_> {
     }
 }
 
-impl io::Write for FakeStream<'_> {
+impl<T> io::Write for FakeStream<T>
+where
+    T: Stats,
+{
     fn write(&mut self, buf: &[u8]) -> Result<usize, io::Error> {
-        self.stats.inc_write();
+        self.stats.inc(StatsType::Write);
 
         self.calls += 1;
 
@@ -194,7 +86,10 @@ impl io::Write for FakeStream<'_> {
     }
 }
 
-impl Evented for FakeStream<'_> {
+impl<T> Evented for FakeStream<T>
+where
+    T: Stats,
+{
     fn set_poll_index(&self, index: Option<usize>) {
         self.poll_index.set(index);
     }
@@ -204,14 +99,17 @@ impl Evented for FakeStream<'_> {
     }
 }
 
-pub struct FakeListener<'s> {
+pub struct FakeListener<T> {
     poll_index: Cell<Option<usize>>,
-    stats: &'s Stats,
+    stats: T,
     calls: RefCell<usize>,
 }
 
-impl<'s> FakeListener<'s> {
-    pub fn new(stats: &'s Stats) -> Self {
+impl<T> FakeListener<T>
+where
+    T: Stats + Clone,
+{
+    pub fn new(stats: T) -> Self {
         Self {
             poll_index: Cell::new(None),
             stats,
@@ -219,20 +117,20 @@ impl<'s> FakeListener<'s> {
         }
     }
 
-    pub fn accept(&self) -> Result<FakeStream<'s>, io::Error> {
-        self.stats.inc_accept();
+    pub fn accept(&self) -> Result<FakeStream<T>, io::Error> {
+        self.stats.inc(StatsType::Accept);
 
         *self.calls.borrow_mut() += 1;
 
         if *self.calls.borrow() % 2 == 1 {
             Err(io::Error::from(io::ErrorKind::WouldBlock))
         } else {
-            Ok(FakeStream::new(self.stats))
+            Ok(FakeStream::new(self.stats.clone()))
         }
     }
 }
 
-impl Evented for FakeListener<'_> {
+impl<T> Evented for FakeListener<T> {
     fn set_poll_index(&self, index: Option<usize>) {
         self.poll_index.set(index);
     }
@@ -245,13 +143,16 @@ impl Evented for FakeListener<'_> {
 pub const READABLE: u8 = 1;
 pub const WRITABLE: u8 = 2;
 
-pub struct Poll<'s> {
-    stats: &'s Stats,
+pub struct Poll<T> {
+    stats: T,
     items: RefCell<Slab<(u8, usize)>>,
 }
 
-impl<'s> Poll<'s> {
-    pub fn new(capacity: usize, stats: &'s Stats) -> Self {
+impl<T> Poll<T>
+where
+    T: Stats,
+{
+    pub fn new(capacity: usize, stats: T) -> Self {
         Self {
             stats,
             items: RefCell::new(Slab::with_capacity(capacity)),
@@ -259,7 +160,7 @@ impl<'s> Poll<'s> {
     }
 
     pub fn register<E: Evented>(&self, handle: &E, key: usize, interest: u8) {
-        self.stats.inc_register();
+        self.stats.inc(StatsType::Register);
 
         let index = self.items.borrow_mut().insert((interest, key));
 
@@ -267,7 +168,7 @@ impl<'s> Poll<'s> {
     }
 
     pub fn unregister<E: Evented>(&self, handle: &E) {
-        self.stats.inc_unregister();
+        self.stats.inc(StatsType::Unregister);
 
         if let Some(index) = handle.get_poll_index() {
             self.items.borrow_mut().remove(index);
@@ -277,7 +178,7 @@ impl<'s> Poll<'s> {
     }
 
     pub fn poll(&self, events: &mut Slab<(usize, u8)>) {
-        self.stats.inc_poll();
+        self.stats.inc(StatsType::Poll);
 
         events.clear();
 
@@ -287,7 +188,7 @@ impl<'s> Poll<'s> {
     }
 }
 
-impl Drop for Poll<'_> {
+impl<T> Drop for Poll<T> {
     fn drop(&mut self) {
         // confirm all i/o objects were unregistered
         assert!(self.items.borrow().is_empty());

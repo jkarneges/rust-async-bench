@@ -1,57 +1,70 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use rust_async_bench::executor::{Executor, Spawner};
-use rust_async_bench::fakeio::Stats;
-use rust_async_bench::future::FakeReactor;
-use rust_async_bench::run::{do_async, AsyncInvoke, RunManual, CONNS_MAX};
+use rust_async_bench::run;
 
 fn criterion_benchmark(c: &mut Criterion) {
-    {
-        let stats = Stats::new(false);
-        let mut r = RunManual::new(&stats);
+    run::run_manual(false, |r| {
+        c.bench_function("manual", |b| b.iter(|| r()));
+    });
 
-        c.bench_function("manual", |b| b.iter(|| r.run()));
-    }
+    run::run_nonbox(false, |r| {
+        c.bench_function("nonbox", |b| b.iter(|| r()));
+    });
 
-    {
-        let stats = Stats::new(false);
-        let reactor = FakeReactor::new(CONNS_MAX + 1, &stats);
-        let spawner = Spawner::new();
-        let executor = Executor::new(&reactor, CONNS_MAX + 1, |invoke| {
-            do_async(&spawner, &reactor, &stats, invoke)
-        });
-        executor.set_spawner(&spawner);
+    run::run_callerbox(false, |r| {
+        c.bench_function("callerbox", |b| b.iter(|| r()));
+    });
 
-        c.bench_function("async", |b| {
-            b.iter(|| {
-                spawner.spawn(AsyncInvoke::Listen).unwrap();
-                executor.exec();
-            })
-        });
-    }
+    run::run_large_nonbox(false, |r| {
+        c.bench_function("large+nonbox", |b| b.iter(|| r()));
+    });
 
-    {
-        let stats = Stats::new(true);
-        let mut r = RunManual::new(&stats);
+    run::run_box(false, |r| {
+        c.bench_function("box", |b| b.iter(|| r()));
+    });
 
-        c.bench_function("manual+syscalls", |b| b.iter(|| r.run()));
-    }
+    run::run_box_callerbox(false, |r| {
+        c.bench_function("box+callerbox", |b| b.iter(|| r()));
+    });
 
-    {
-        let stats = Stats::new(true);
-        let reactor = FakeReactor::new(CONNS_MAX + 1, &stats);
-        let spawner = Spawner::new();
-        let executor = Executor::new(&reactor, CONNS_MAX + 1, |invoke| {
-            do_async(&spawner, &reactor, &stats, invoke)
-        });
-        executor.set_spawner(&spawner);
+    run::run_large_box(false, |r| {
+        c.bench_function("large+box", |b| b.iter(|| r()));
+    });
 
-        c.bench_function("async+syscalls", |b| {
-            b.iter(|| {
-                spawner.spawn(AsyncInvoke::Listen).unwrap();
-                executor.exec();
-            })
-        });
-    }
+    run::run_box_rc(false, run::BoxRcMode::RcWaker, |r| {
+        c.bench_function("box+rc", |b| b.iter(|| r()));
+    });
+
+    run::run_box_rc(false, run::BoxRcMode::CheckedRcWaker, |r| {
+        c.bench_function("box+chkrc", |b| b.iter(|| r()));
+    });
+
+    run::run_box_rc(false, run::BoxRcMode::ArcWaker, |r| {
+        c.bench_function("box+arc", |b| b.iter(|| r()));
+    });
+
+    run::run_manual(true, |r| {
+        c.bench_function("manual+syscalls", |b| b.iter(|| r()));
+    });
+
+    run::run_nonbox(true, |r| {
+        c.bench_function("nonbox+syscalls", |b| b.iter(|| r()));
+    });
+
+    run::run_box(true, |r| {
+        c.bench_function("box+syscalls", |b| b.iter(|| r()));
+    });
+
+    run::run_box_rc(true, run::BoxRcMode::RcWaker, |r| {
+        c.bench_function("box+rc+syscalls", |b| b.iter(|| r()));
+    });
+
+    run::run_box_rc(true, run::BoxRcMode::CheckedRcWaker, |r| {
+        c.bench_function("box+chkrc+syscalls", |b| b.iter(|| r()));
+    });
+
+    run::run_box_rc(true, run::BoxRcMode::ArcWaker, |r| {
+        c.bench_function("box+arc+syscalls", |b| b.iter(|| r()));
+    });
 }
 
 criterion_group!(benches, criterion_benchmark);

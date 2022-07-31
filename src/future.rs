@@ -5,21 +5,61 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::io;
 use std::io::{Read, Write};
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
-pub trait Reactor {
-    fn poll(&self) -> Result<(), io::Error>;
+pub trait FakeReactorRef<T>: Clone
+where
+    T: Stats,
+{
+    fn get(&self) -> &FakeReactor<T>;
+
+    fn register<'a, E: Evented>(
+        &'a self,
+        handle: &E,
+        interest: u8,
+    ) -> Result<RegistrationHandle<T, Self>, io::Error> {
+        let r = self.get();
+
+        let data = &mut *r.data.borrow_mut();
+
+        if data.registrations.len() == data.registrations.capacity() {
+            return Err(io::Error::from(io::ErrorKind::WriteZero));
+        }
+
+        let key = data.registrations.insert(EventRegistration {
+            ready: false,
+            waker: None,
+        });
+
+        r.poll.register(handle, key, interest);
+
+        Ok(RegistrationHandle {
+            reactor: self.clone(),
+            key,
+            _marker: PhantomData,
+        })
+    }
 }
 
-pub struct RegistrationHandle<'a, 's> {
-    reactor: &'a FakeReactor<'s>,
+pub struct RegistrationHandle<T, R>
+where
+    T: Stats,
+    R: FakeReactorRef<T>,
+{
+    reactor: R,
     key: usize,
+    _marker: PhantomData<T>,
 }
 
-impl RegistrationHandle<'_, '_> {
+impl<T, R> RegistrationHandle<T, R>
+where
+    T: Stats,
+    R: FakeReactorRef<T>,
+{
     fn is_ready(&self) -> bool {
-        let data = &*self.reactor.data.borrow();
+        let data = &*self.reactor.get().data.borrow();
 
         let event_reg = &data.registrations[self.key];
 
@@ -27,23 +67,30 @@ impl RegistrationHandle<'_, '_> {
     }
 
     fn set_ready(&self, ready: bool) {
-        let data = &mut *self.reactor.data.borrow_mut();
+        let data = &mut *self.reactor.get().data.borrow_mut();
 
         let event_reg = &mut data.registrations[self.key];
 
         event_reg.ready = ready;
     }
 
-    fn bind_waker(&self, waker: Waker) {
-        let data = &mut *self.reactor.data.borrow_mut();
+    fn bind_waker(&self, waker: &Waker) {
+        let data = &mut *self.reactor.get().data.borrow_mut();
 
         let event_reg = &mut data.registrations[self.key];
 
-        event_reg.waker = Some(waker);
+        if let Some(current_waker) = &event_reg.waker {
+            if current_waker.will_wake(waker) {
+                // keep the current waker
+                return;
+            }
+        }
+
+        event_reg.waker = Some(waker.clone());
     }
 
     fn unbind_waker(&self) {
-        let data = &mut *self.reactor.data.borrow_mut();
+        let data = &mut *self.reactor.get().data.borrow_mut();
 
         let event_reg = &mut data.registrations[self.key];
 
@@ -51,9 +98,13 @@ impl RegistrationHandle<'_, '_> {
     }
 }
 
-impl Drop for RegistrationHandle<'_, '_> {
+impl<T, R> Drop for RegistrationHandle<T, R>
+where
+    T: Stats,
+    R: FakeReactorRef<T>,
+{
     fn drop(&mut self) {
-        let data = &mut *self.reactor.data.borrow_mut();
+        let data = &mut *self.reactor.get().data.borrow_mut();
 
         data.registrations.remove(self.key);
     }
@@ -69,13 +120,16 @@ struct FakeReactorData {
     events: Slab<(usize, u8)>,
 }
 
-pub struct FakeReactor<'s> {
+pub struct FakeReactor<T> {
     data: RefCell<FakeReactorData>,
-    poll: fakeio::Poll<'s>,
+    poll: fakeio::Poll<T>,
 }
 
-impl<'s> FakeReactor<'s> {
-    pub fn new(registrations_max: usize, stats: &'s Stats) -> Self {
+impl<T> FakeReactor<T>
+where
+    T: Stats,
+{
+    pub fn new(registrations_max: usize, stats: T) -> Self {
         let data = FakeReactorData {
             registrations: Slab::with_capacity(registrations_max),
             events: Slab::with_capacity(128),
@@ -87,34 +141,7 @@ impl<'s> FakeReactor<'s> {
         }
     }
 
-    fn register<'a, E: Evented>(
-        &'a self,
-        handle: &E,
-        interest: u8,
-    ) -> Result<RegistrationHandle<'a, 's>, io::Error> {
-        let data = &mut *self.data.borrow_mut();
-
-        if data.registrations.len() == data.registrations.capacity() {
-            return Err(io::Error::from(io::ErrorKind::WriteZero));
-        }
-
-        let key = data.registrations.insert(EventRegistration {
-            ready: false,
-            waker: None,
-        });
-
-        self.poll.register(handle, key, interest);
-
-        Ok(RegistrationHandle { reactor: self, key })
-    }
-
-    fn unregister<E: Evented>(&self, handle: &E) {
-        self.poll.unregister(handle);
-    }
-}
-
-impl Reactor for FakeReactor<'_> {
-    fn poll(&self) -> Result<(), io::Error> {
+    pub fn poll(&self) -> Result<(), io::Error> {
         let data = &mut *self.data.borrow_mut();
 
         self.poll.poll(&mut data.events);
@@ -131,15 +158,27 @@ impl Reactor for FakeReactor<'_> {
 
         Ok(())
     }
+
+    fn unregister<E: Evented>(&self, handle: &E) {
+        self.poll.unregister(handle);
+    }
 }
 
-pub struct AsyncFakeStream<'r, 's> {
-    inner: FakeStream<'s>,
-    handle: RegistrationHandle<'r, 's>,
+pub struct AsyncFakeStream<T, R>
+where
+    T: Stats,
+    R: FakeReactorRef<T>,
+{
+    inner: FakeStream<T>,
+    handle: RegistrationHandle<T, R>,
 }
 
-impl<'r, 's: 'r> AsyncFakeStream<'r, 's> {
-    pub fn new(s: FakeStream<'s>, reactor: &'r FakeReactor<'s>) -> Self {
+impl<T, R> AsyncFakeStream<T, R>
+where
+    T: Stats + Clone,
+    R: FakeReactorRef<T>,
+{
+    pub fn new(s: FakeStream<T>, reactor: R) -> Self {
         let handle = reactor.register(&s, READABLE | WRITABLE).unwrap();
 
         handle.set_ready(true);
@@ -147,28 +186,40 @@ impl<'r, 's: 'r> AsyncFakeStream<'r, 's> {
         Self { inner: s, handle }
     }
 
-    pub fn read<'a>(&'a mut self, buf: &'a mut [u8]) -> ReadFuture<'a, 'r, 's> {
+    pub fn read<'a>(&'a mut self, buf: &'a mut [u8]) -> ReadFuture<'a, T, R> {
         ReadFuture { s: self, buf }
     }
 
-    pub fn write<'a>(&'a mut self, buf: &'a [u8]) -> WriteFuture<'a, 'r, 's> {
+    pub fn write<'a>(&'a mut self, buf: &'a [u8]) -> WriteFuture<'a, T, R> {
         WriteFuture { s: self, buf }
     }
 }
 
-impl Drop for AsyncFakeStream<'_, '_> {
+impl<T, R> Drop for AsyncFakeStream<T, R>
+where
+    T: Stats,
+    R: FakeReactorRef<T>,
+{
     fn drop(&mut self) {
-        self.handle.reactor.unregister(&self.inner);
+        self.handle.reactor.get().unregister(&self.inner);
     }
 }
 
-pub struct AsyncFakeListener<'r, 's> {
-    inner: FakeListener<'s>,
-    handle: RegistrationHandle<'r, 's>,
+pub struct AsyncFakeListener<T, R>
+where
+    T: Stats,
+    R: FakeReactorRef<T>,
+{
+    inner: FakeListener<T>,
+    handle: RegistrationHandle<T, R>,
 }
 
-impl<'r, 's: 'r> AsyncFakeListener<'r, 's> {
-    pub fn new(reactor: &'r FakeReactor<'s>, stats: &'s Stats) -> Self {
+impl<T, R> AsyncFakeListener<T, R>
+where
+    T: Stats + Clone,
+    R: FakeReactorRef<T>,
+{
+    pub fn new(reactor: R, stats: T) -> Self {
         let l = FakeListener::new(stats);
 
         let handle = reactor.register(&l, READABLE).unwrap();
@@ -178,29 +229,41 @@ impl<'r, 's: 'r> AsyncFakeListener<'r, 's> {
         Self { inner: l, handle }
     }
 
-    pub fn accept<'a>(&'a self) -> AcceptFuture<'a, 'r, 's> {
+    pub fn accept<'a>(&'a self) -> AcceptFuture<'a, T, R> {
         AcceptFuture { l: self }
     }
 }
 
-impl Drop for AsyncFakeListener<'_, '_> {
+impl<T, R> Drop for AsyncFakeListener<T, R>
+where
+    T: Stats,
+    R: FakeReactorRef<T>,
+{
     fn drop(&mut self) {
-        self.handle.reactor.unregister(&self.inner);
+        self.handle.reactor.get().unregister(&self.inner);
     }
 }
 
-pub struct ReadFuture<'a, 'r, 's> {
-    s: &'a mut AsyncFakeStream<'r, 's>,
+pub struct ReadFuture<'a, T, R>
+where
+    T: Stats,
+    R: FakeReactorRef<T>,
+{
+    s: &'a mut AsyncFakeStream<T, R>,
     buf: &'a mut [u8],
 }
 
-impl<'a, 'r, 's: 'a> Future for ReadFuture<'a, 'r, 's> {
+impl<'a, T, R> Future for ReadFuture<'a, T, R>
+where
+    T: Stats,
+    R: FakeReactorRef<T>,
+{
     type Output = Result<usize, io::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let f = &mut *self;
 
-        f.s.handle.bind_waker(cx.waker().clone());
+        f.s.handle.bind_waker(cx.waker());
 
         if !f.s.handle.is_ready() {
             return Poll::Pending;
@@ -218,24 +281,36 @@ impl<'a, 'r, 's: 'a> Future for ReadFuture<'a, 'r, 's> {
     }
 }
 
-impl Drop for ReadFuture<'_, '_, '_> {
+impl<T, R> Drop for ReadFuture<'_, T, R>
+where
+    T: Stats,
+    R: FakeReactorRef<T>,
+{
     fn drop(&mut self) {
         self.s.handle.unbind_waker();
     }
 }
 
-pub struct WriteFuture<'a, 'r, 's> {
-    s: &'a mut AsyncFakeStream<'r, 's>,
+pub struct WriteFuture<'a, T, R>
+where
+    T: Stats,
+    R: FakeReactorRef<T>,
+{
+    s: &'a mut AsyncFakeStream<T, R>,
     buf: &'a [u8],
 }
 
-impl<'a, 'r, 's: 'a> Future for WriteFuture<'a, 'r, 's> {
+impl<'a, T, R> Future for WriteFuture<'a, T, R>
+where
+    T: Stats,
+    R: FakeReactorRef<T>,
+{
     type Output = Result<usize, io::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let f = &mut *self;
 
-        f.s.handle.bind_waker(cx.waker().clone());
+        f.s.handle.bind_waker(cx.waker());
 
         if !f.s.handle.is_ready() {
             return Poll::Pending;
@@ -253,30 +328,42 @@ impl<'a, 'r, 's: 'a> Future for WriteFuture<'a, 'r, 's> {
     }
 }
 
-impl Drop for WriteFuture<'_, '_, '_> {
+impl<T, R> Drop for WriteFuture<'_, T, R>
+where
+    T: Stats,
+    R: FakeReactorRef<T>,
+{
     fn drop(&mut self) {
         self.s.handle.unbind_waker();
     }
 }
 
-pub struct AcceptFuture<'a, 'r, 's> {
-    l: &'a AsyncFakeListener<'r, 's>,
+pub struct AcceptFuture<'a, T, R>
+where
+    T: Stats,
+    R: FakeReactorRef<T>,
+{
+    l: &'a AsyncFakeListener<T, R>,
 }
 
-impl<'a, 'r, 's: 'a> Future for AcceptFuture<'a, 'r, 's> {
-    type Output = Result<AsyncFakeStream<'r, 's>, io::Error>;
+impl<'a, T, R> Future for AcceptFuture<'a, T, R>
+where
+    T: Stats + Clone,
+    R: FakeReactorRef<T>,
+{
+    type Output = Result<AsyncFakeStream<T, R>, io::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let f = &mut *self;
 
-        f.l.handle.bind_waker(cx.waker().clone());
+        f.l.handle.bind_waker(cx.waker());
 
         if !f.l.handle.is_ready() {
             return Poll::Pending;
         }
 
         match f.l.inner.accept() {
-            Ok(stream) => Poll::Ready(Ok(AsyncFakeStream::new(stream, f.l.handle.reactor))),
+            Ok(stream) => Poll::Ready(Ok(AsyncFakeStream::new(stream, f.l.handle.reactor.clone()))),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 f.l.handle.set_ready(false);
 
@@ -287,7 +374,11 @@ impl<'a, 'r, 's: 'a> Future for AcceptFuture<'a, 'r, 's> {
     }
 }
 
-impl Drop for AcceptFuture<'_, '_, '_> {
+impl<T, R> Drop for AcceptFuture<'_, T, R>
+where
+    T: Stats,
+    R: FakeReactorRef<T>,
+{
     fn drop(&mut self) {
         self.l.handle.unbind_waker();
     }
