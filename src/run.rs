@@ -11,7 +11,7 @@ use std::io;
 use std::io::{Read, Write};
 use std::rc::Rc;
 
-pub const CONNS_MAX: usize = 32;
+pub const CONNS_MAX: usize = 256;
 pub const SMALL_BUFSIZE: usize = 128;
 pub const LARGE_BUFSIZE: usize = 16_384;
 
@@ -668,12 +668,12 @@ mod tests {
     use super::*;
 
     const EXPECTED_STATS: StatsMetrics = StatsMetrics {
-        register: 33,
-        unregister: 33,
-        poll: 34,
-        accept: 64,
-        read: 64,
-        write: 64,
+        register: 257,
+        unregister: 257,
+        poll: 258,
+        accept: 512,
+        read: 512,
+        write: 512,
     };
 
     #[test]
