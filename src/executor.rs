@@ -1,75 +1,11 @@
-use std::cell::RefCell;
 use std::future::Future;
-use std::mem::ManuallyDrop;
 use std::pin::Pin;
-use std::task::{RawWaker, RawWakerVTable, Waker};
-
-trait SharedWake {
-    fn wake(&self, task_id: usize);
-}
-
-struct SharedWaker<W> {
-    refs: RefCell<usize>,
-    wake: *const W,
-    task_id: usize,
-}
-
-impl<W> SharedWaker<W>
-where
-    W: SharedWake,
-{
-    // SAFETY: caller must ensure the wake field remains valid for as long as
-    // the waker (and its clones) may be used
-    unsafe fn as_std(&self) -> ManuallyDrop<Waker> {
-        let rw = RawWaker::new(
-            self as *const Self as *const (),
-            &RawWakerVTable::new(Self::clone, Self::wake, Self::wake_by_ref, Self::drop),
-        );
-
-        ManuallyDrop::new(Waker::from_raw(rw))
-    }
-
-    unsafe fn clone(data: *const ()) -> RawWaker {
-        let s = (data as *const Self).as_ref().unwrap();
-
-        *s.refs.borrow_mut() += 1;
-
-        RawWaker::new(
-            data,
-            &RawWakerVTable::new(Self::clone, Self::wake, Self::wake_by_ref, Self::drop),
-        )
-    }
-
-    unsafe fn wake(data: *const ()) {
-        Self::wake_by_ref(data);
-
-        Self::drop(data);
-    }
-
-    unsafe fn wake_by_ref(data: *const ()) {
-        let s = (data as *const Self).as_ref().unwrap();
-
-        let wake = s.wake.as_ref().unwrap();
-
-        wake.wake(s.task_id);
-    }
-
-    unsafe fn drop(data: *const ()) {
-        let s = (data as *const Self).as_ref().unwrap();
-
-        let refs = &mut *s.refs.borrow_mut();
-
-        assert!(*refs > 1);
-
-        *refs -= 1;
-    }
-}
 
 pub type BoxFuture = Pin<Box<dyn Future<Output = ()>>>;
 
 mod arg {
-    use super::{SharedWake, SharedWaker};
     use crate::list;
+    use crate::waker::{EmbedWake, EmbedWaker};
     use slab::Slab;
     use std::cell::RefCell;
     use std::future::Future;
@@ -78,24 +14,24 @@ mod arg {
     use std::pin::Pin;
     use std::task::{Context, Poll};
 
-    struct Task<W> {
-        waker: SharedWaker<W>,
+    struct Task<'a, W> {
+        waker: EmbedWaker<'a, W>,
         awake: bool,
     }
 
-    struct TasksData<F, W> {
-        nodes: Slab<list::Node<Task<W>>>,
+    struct TasksData<'a, F, W> {
+        nodes: Slab<list::Node<Task<'a, W>>>,
         next: list::List,
         futs: Vec<MaybeUninit<F>>,
     }
 
-    struct Tasks<F> {
-        data: RefCell<TasksData<F, Self>>,
+    struct Tasks<'a, F> {
+        data: RefCell<TasksData<'a, F, Self>>,
     }
 
-    impl<F> Tasks<F>
+    impl<'a, F> Tasks<'a, F>
     where
-        F: Future<Output = ()>,
+        F: Future<Output = ()> + 'a,
     {
         fn new(tasks_max: usize) -> Self {
             let mut data = TasksData {
@@ -115,7 +51,7 @@ mod arg {
             self.data.borrow().nodes.is_empty()
         }
 
-        fn add<S>(&self, get_fut_fn: S) -> Result<(), ()>
+        fn add<S>(&'a self, get_fut_fn: S) -> Result<(), ()>
         where
             S: FnOnce(&mut MaybeUninit<F>),
         {
@@ -128,11 +64,7 @@ mod arg {
             let entry = data.nodes.vacant_entry();
             let key = entry.key();
 
-            let waker = SharedWaker {
-                refs: RefCell::new(1),
-                wake: self,
-                task_id: key,
-            };
+            let waker = EmbedWaker::new(self, key);
 
             let task = Task { waker, awake: true };
 
@@ -193,9 +125,13 @@ mod arg {
                 let mut fut = unsafe { Pin::new_unchecked(fut_ptr.as_mut().unwrap()) };
 
                 let done = {
-                    let w = unsafe { task.waker.as_std() };
+                    // SAFETY: as established above, the task won't move,
+                    //   thus neither will the waker field
+                    let w = unsafe { Pin::new_unchecked(&mut task.waker) };
 
-                    let mut cx = Context::from_waker(&w);
+                    let mut waker_mem = MaybeUninit::uninit();
+
+                    let mut cx = Context::from_waker(w.as_std(&mut waker_mem));
 
                     match fut.as_mut().poll(&mut cx) {
                         Poll::Ready(_) => true,
@@ -210,7 +146,7 @@ mod arg {
 
                     let task = &mut tasks.nodes[nkey].value;
 
-                    assert_eq!(*task.waker.refs.borrow(), 1);
+                    assert_eq!(task.waker.ref_count(), 1);
 
                     tasks.next.remove(&mut tasks.nodes, nkey);
                     tasks.nodes.remove(nkey);
@@ -219,7 +155,7 @@ mod arg {
         }
     }
 
-    impl<F> SharedWake for Tasks<F>
+    impl<F> EmbedWake for Tasks<'_, F>
     where
         F: Future<Output = ()>,
     {
@@ -233,11 +169,11 @@ mod arg {
         spawn_fn: unsafe fn(*const (), A) -> Result<(), ()>,
     }
 
-    pub struct Spawner<A> {
+    pub struct ArgSpawner<A> {
         data: RefCell<Option<SpawnerData<A>>>,
     }
 
-    impl<A> Spawner<A> {
+    impl<A> ArgSpawner<A> {
         pub fn new() -> Self {
             Self {
                 data: RefCell::new(None),
@@ -252,16 +188,16 @@ mod arg {
         }
     }
 
-    pub struct ArgExecutor<'a, F, A, S> {
-        tasks: Tasks<F>,
+    pub struct ArgExecutor<'sp, 'ex, F, A, S> {
+        tasks: Tasks<'ex, F>,
         spawn_fn: S,
-        spawner: RefCell<Option<&'a Spawner<A>>>,
+        spawner: RefCell<Option<&'sp ArgSpawner<A>>>,
     }
 
-    impl<'a, F, A: 'a, S> ArgExecutor<'a, F, A, S>
+    impl<'sp: 'ex, 'ex, F, A: 'sp, S> ArgExecutor<'sp, 'ex, F, A, S>
     where
-        F: Future<Output = ()>,
-        S: Fn(A, &mut MaybeUninit<F>),
+        F: Future<Output = ()> + 'ex,
+        S: Fn(A, &mut MaybeUninit<F>) + 'ex,
     {
         pub fn new(tasks_max: usize, spawn_fn: S) -> Self {
             Self {
@@ -271,11 +207,11 @@ mod arg {
             }
         }
 
-        pub fn spawn(&self, arg: A) -> Result<(), ()> {
+        pub fn spawn(&'ex self, arg: A) -> Result<(), ()> {
             self.tasks.add(|dest| (self.spawn_fn)(arg, dest))
         }
 
-        pub fn set_spawner(&self, spawner: &'a Spawner<A>) {
+        pub fn set_spawner(&self, spawner: &'sp ArgSpawner<A>) {
             *self.spawner.borrow_mut() = Some(spawner);
 
             let mut spawner = self.spawner.borrow_mut();
@@ -309,7 +245,7 @@ mod arg {
         }
     }
 
-    impl<'a, F, A: 'a, S> Drop for ArgExecutor<'a, F, A, S> {
+    impl<'sp, 'ex, F, A: 'sp, S> Drop for ArgExecutor<'sp, 'ex, F, A, S> {
         fn drop(&mut self) {
             if let Some(spawner) = &mut *self.spawner.borrow_mut() {
                 *spawner.data.borrow_mut() = None;
@@ -319,48 +255,48 @@ mod arg {
 }
 
 mod bx {
-    use super::BoxFuture;
-    use super::{SharedWake, SharedWaker};
     use crate::list;
+    use crate::waker::{EmbedWake, EmbedWaker};
     use slab::Slab;
     use std::cell::RefCell;
     use std::future::Future;
     use std::io;
-    use std::rc::Rc;
+    use std::mem::MaybeUninit;
+    use std::pin::Pin;
     use std::task::{Context, Poll};
 
-    struct Task<W> {
-        fut: Option<BoxFuture>,
-        waker: SharedWaker<W>,
+    struct Task<'a, W> {
+        fut: Option<Pin<Box<dyn Future<Output = ()> + 'a>>>,
+        waker: EmbedWaker<'a, W>,
         awake: bool,
     }
 
-    struct TasksData<W> {
-        nodes: Slab<list::Node<Task<W>>>,
+    struct TasksData<'a, W> {
+        nodes: Slab<list::Node<Task<'a, W>>>,
         next: list::List,
     }
 
-    struct Tasks {
-        data: RefCell<TasksData<Self>>,
+    struct Tasks<'a> {
+        data: RefCell<TasksData<'a, Self>>,
     }
 
-    impl Tasks {
-        fn new(tasks_max: usize) -> Rc<Self> {
+    impl<'a> Tasks<'a> {
+        fn new(tasks_max: usize) -> Self {
             let data = TasksData {
                 nodes: Slab::with_capacity(tasks_max),
                 next: list::List::default(),
             };
 
-            Rc::new(Self {
+            Self {
                 data: RefCell::new(data),
-            })
+            }
         }
 
         fn is_empty(&self) -> bool {
             self.data.borrow().nodes.is_empty()
         }
 
-        fn add(&self, f: BoxFuture) -> Result<(), ()> {
+        fn add(&'a self, f: Pin<Box<dyn Future<Output = ()> + 'a>>) -> Result<(), ()> {
             let data = &mut *self.data.borrow_mut();
 
             if data.nodes.len() == data.nodes.capacity() {
@@ -370,11 +306,7 @@ mod bx {
             let entry = data.nodes.vacant_entry();
             let key = entry.key();
 
-            let waker = SharedWaker {
-                refs: RefCell::new(1),
-                wake: self,
-                task_id: key,
-            };
+            let waker = EmbedWaker::new(self, key);
 
             let task = Task {
                 fut: Some(f),
@@ -429,11 +361,16 @@ mod bx {
                 let task = unsafe { task_ptr.as_mut().unwrap() };
 
                 let done = {
-                    let fut: &mut BoxFuture = task.fut.as_mut().unwrap();
+                    let fut: &mut Pin<Box<dyn Future<Output = ()> + 'a>> =
+                        task.fut.as_mut().unwrap();
 
-                    let w = unsafe { task.waker.as_std() };
+                    // SAFETY: as established above, the task won't move,
+                    //   thus neither will the waker field
+                    let w = unsafe { Pin::new_unchecked(&mut task.waker) };
 
-                    let mut cx = Context::from_waker(&w);
+                    let mut waker_mem = MaybeUninit::uninit();
+
+                    let mut cx = Context::from_waker(w.as_std(&mut waker_mem));
 
                     match fut.as_mut().poll(&mut cx) {
                         Poll::Ready(_) => true,
@@ -444,7 +381,7 @@ mod bx {
                 if done {
                     task.fut = None;
 
-                    assert_eq!(*task.waker.refs.borrow(), 1);
+                    assert_eq!(task.waker.ref_count(), 1);
 
                     let tasks = &mut *self.data.borrow_mut();
 
@@ -455,32 +392,79 @@ mod bx {
         }
     }
 
-    impl SharedWake for Tasks {
+    impl EmbedWake for Tasks<'_> {
         fn wake(&self, task_id: usize) {
             Tasks::wake(self, task_id);
         }
     }
 
-    pub struct BoxExecutor {
-        tasks: Rc<Tasks>,
+    struct SpawnerData<'a> {
+        ctx: *const (),
+        spawn_fn: unsafe fn(*const (), Pin<Box<dyn Future<Output = ()> + 'a>>) -> Result<(), ()>,
     }
 
-    impl BoxExecutor {
-        pub fn new(tasks_max: usize) -> Self {
+    pub struct BoxSpawner<'a> {
+        data: RefCell<Option<SpawnerData<'a>>>,
+    }
+
+    impl<'a> BoxSpawner<'a> {
+        pub fn new() -> Self {
             Self {
-                tasks: Tasks::new(tasks_max),
+                data: RefCell::new(None),
             }
         }
 
         pub fn spawn<F>(&self, f: F) -> Result<(), ()>
         where
-            F: Future<Output = ()> + 'static,
+            F: Future<Output = ()> + 'a,
         {
-            self.tasks.add(Box::pin(f))
+            self.spawn_boxed(Box::pin(f))
         }
 
-        pub fn spawn_boxed(&self, f: BoxFuture) -> Result<(), ()> {
+        pub fn spawn_boxed(&self, f: Pin<Box<dyn Future<Output = ()> + 'a>>) -> Result<(), ()> {
+            match &*self.data.borrow() {
+                Some(data) => unsafe { (data.spawn_fn)(data.ctx, f) },
+                None => Err(()),
+            }
+        }
+    }
+
+    pub struct BoxExecutor<'sp: 'ex, 'ex> {
+        tasks: Tasks<'ex>,
+        spawner: RefCell<Option<&'sp BoxSpawner<'sp>>>,
+    }
+
+    impl<'sp: 'ex, 'ex> BoxExecutor<'sp, 'ex> {
+        pub fn new(tasks_max: usize) -> Self {
+            Self {
+                tasks: Tasks::new(tasks_max),
+                spawner: RefCell::new(None),
+            }
+        }
+
+        pub fn spawn(&'ex self, f: Pin<Box<dyn Future<Output = ()> + 'sp>>) -> Result<(), ()> {
             self.tasks.add(f)
+        }
+
+        pub fn set_spawner(&self, spawner: &'sp BoxSpawner<'sp>) {
+            *self.spawner.borrow_mut() = Some(spawner);
+
+            let mut spawner = self.spawner.borrow_mut();
+            let spawner = spawner.as_mut().unwrap();
+
+            *spawner.data.borrow_mut() = Some(SpawnerData {
+                ctx: self as *const Self as *const (),
+                spawn_fn: Self::spawn_fn,
+            });
+        }
+
+        unsafe fn spawn_fn(
+            ctx: *const (),
+            f: Pin<Box<dyn Future<Output = ()> + 'sp>>,
+        ) -> Result<(), ()> {
+            let executor = { (ctx as *const Self).as_ref().unwrap() };
+
+            executor.spawn(f)
         }
 
         pub fn run<P>(&self, park: P)
@@ -495,6 +479,14 @@ mod bx {
                 }
 
                 park().unwrap();
+            }
+        }
+    }
+
+    impl<'sp, 'ex> Drop for BoxExecutor<'sp, 'ex> {
+        fn drop(&mut self) {
+            if let Some(spawner) = &mut *self.spawner.borrow_mut() {
+                *spawner.data.borrow_mut() = None;
             }
         }
     }
@@ -754,6 +746,6 @@ mod boxrc {
     }
 }
 
-pub use arg::{ArgExecutor, Spawner};
+pub use arg::{ArgExecutor, ArgSpawner};
 pub use boxrc::BoxRcExecutor;
-pub use bx::BoxExecutor;
+pub use bx::{BoxExecutor, BoxSpawner};

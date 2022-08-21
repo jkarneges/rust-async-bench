@@ -1,4 +1,4 @@
-use crate::executor::{ArgExecutor, BoxExecutor, BoxRcExecutor, Spawner};
+use crate::executor::{ArgExecutor, ArgSpawner, BoxExecutor, BoxRcExecutor, BoxSpawner};
 use crate::fakeio;
 use crate::fakeio::{FakeListener, FakeStream, Poll, READABLE, WRITABLE};
 use crate::future::{AsyncFakeListener, AsyncFakeStream, FakeReactor, FakeReactorRef};
@@ -327,7 +327,7 @@ impl<'s> RunManual<'s> {
 }
 
 async fn listen<'r, 's: 'r>(
-    spawner: &'r Spawner<AsyncInvoke<'r, 's>>,
+    spawner: &'r ArgSpawner<AsyncInvoke<'r, 's>>,
     reactor: &'r FakeReactor<&'s Stats>,
     stats: &'s Stats,
 ) -> Result<(), io::Error> {
@@ -343,7 +343,7 @@ async fn listen<'r, 's: 'r>(
 }
 
 pub async fn listen_box<const N: usize>(
-    executor: Rc<BoxExecutor>,
+    spawner: &BoxSpawner<'_>,
     reactor: Rc<FakeReactor<Rc<Stats>>>,
     stats: Rc<Stats>,
 ) -> Result<(), io::Error> {
@@ -352,7 +352,7 @@ pub async fn listen_box<const N: usize>(
     for _ in 0..CONNS_MAX {
         let stream = listener.accept().await?;
 
-        executor
+        spawner
             .spawn(async { connection_box::<N>(stream).await.unwrap() })
             .unwrap();
     }
@@ -361,7 +361,7 @@ pub async fn listen_box<const N: usize>(
 }
 
 pub async fn listen_box_callerbox<const N: usize>(
-    executor: Rc<BoxExecutor>,
+    spawner: &BoxSpawner<'_>,
     reactor: Rc<FakeReactor<Rc<Stats>>>,
     stats: Rc<Stats>,
 ) -> Result<(), io::Error> {
@@ -370,7 +370,7 @@ pub async fn listen_box_callerbox<const N: usize>(
     for _ in 0..CONNS_MAX {
         let stream = listener.accept().await?;
 
-        executor
+        spawner
             .spawn_boxed(Box::pin(async {
                 connection_box::<N>(stream).await.unwrap()
             }))
@@ -446,7 +446,7 @@ pub enum AsyncInvoke<'r, 's> {
 }
 
 pub async fn server_task<'r, 's: 'r, const N: usize>(
-    spawner: &'r Spawner<AsyncInvoke<'r, 's>>,
+    spawner: &'r ArgSpawner<AsyncInvoke<'r, 's>>,
     reactor: &'r FakeReactor<&'s Stats>,
     stats: &'s Stats,
     invoke: AsyncInvoke<'r, 's>,
@@ -475,7 +475,7 @@ where
 {
     let stats = Stats::new(syscalls);
     let reactor = FakeReactor::new(CONNS_MAX + 1, &stats);
-    let spawner = Spawner::new();
+    let spawner = ArgSpawner::new();
     let executor = ArgExecutor::new(CONNS_MAX + 1, |invoke, dest| {
         dest.write(server_task::<SMALL_BUFSIZE>(
             &spawner, &reactor, &stats, invoke,
@@ -498,7 +498,7 @@ where
 {
     let stats = Stats::new(syscalls);
     let reactor = FakeReactor::new(CONNS_MAX + 1, &stats);
-    let spawner = Spawner::new();
+    let spawner = ArgSpawner::new();
     let executor = ArgExecutor::new(CONNS_MAX + 1, |invoke, dest| {
         dest.write(Box::pin(server_task::<SMALL_BUFSIZE>(
             &spawner, &reactor, &stats, invoke,
@@ -521,7 +521,7 @@ where
 {
     let stats = Stats::new(syscalls);
     let reactor = FakeReactor::new(CONNS_MAX + 1, &stats);
-    let spawner = Spawner::new();
+    let spawner = ArgSpawner::new();
     let executor = ArgExecutor::new(CONNS_MAX + 1, |invoke, dest| {
         dest.write(server_task::<LARGE_BUFSIZE>(
             &spawner, &reactor, &stats, invoke,
@@ -544,17 +544,19 @@ where
 {
     let stats = Rc::new(Stats::new(syscalls));
     let reactor = Rc::new(FakeReactor::new(CONNS_MAX + 1, stats.clone()));
-    let executor = Rc::new(BoxExecutor::new(CONNS_MAX + 1));
+    let spawner = BoxSpawner::new();
+    let executor = BoxExecutor::new(CONNS_MAX + 1);
+
+    executor.set_spawner(&spawner);
 
     run_fn(&mut || {
         {
             let stats = stats.clone();
             let reactor = reactor.clone();
-            let executor_copy = executor.clone();
 
-            executor
+            spawner
                 .spawn(async {
-                    listen_box::<SMALL_BUFSIZE>(executor_copy, reactor, stats)
+                    listen_box::<SMALL_BUFSIZE>(&spawner, reactor, stats)
                         .await
                         .unwrap()
                 })
@@ -573,17 +575,19 @@ where
 {
     let stats = Rc::new(Stats::new(syscalls));
     let reactor = Rc::new(FakeReactor::new(CONNS_MAX + 1, stats.clone()));
-    let executor = Rc::new(BoxExecutor::new(CONNS_MAX + 1));
+    let spawner = BoxSpawner::new();
+    let executor = BoxExecutor::new(CONNS_MAX + 1);
+
+    executor.set_spawner(&spawner);
 
     run_fn(&mut || {
         {
             let stats = stats.clone();
             let reactor = reactor.clone();
-            let executor_copy = executor.clone();
 
-            executor
+            spawner
                 .spawn_boxed(Box::pin(async {
-                    listen_box_callerbox::<SMALL_BUFSIZE>(executor_copy, reactor, stats)
+                    listen_box_callerbox::<SMALL_BUFSIZE>(&spawner, reactor, stats)
                         .await
                         .unwrap()
                 }))
@@ -602,17 +606,19 @@ where
 {
     let stats = Rc::new(Stats::new(syscalls));
     let reactor = Rc::new(FakeReactor::new(CONNS_MAX + 1, stats.clone()));
-    let executor = Rc::new(BoxExecutor::new(CONNS_MAX + 1));
+    let spawner = BoxSpawner::new();
+    let executor = BoxExecutor::new(CONNS_MAX + 1);
+
+    executor.set_spawner(&spawner);
 
     run_fn(&mut || {
         {
             let stats = stats.clone();
             let reactor = reactor.clone();
-            let executor_copy = executor.clone();
 
-            executor
+            spawner
                 .spawn(async {
-                    listen_box::<LARGE_BUFSIZE>(executor_copy, reactor, stats)
+                    listen_box::<LARGE_BUFSIZE>(&spawner, reactor, stats)
                         .await
                         .unwrap()
                 })

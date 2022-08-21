@@ -1,12 +1,89 @@
 // adapted from alloc::task::Wake
 
-use std::cell::RefCell;
-use std::mem::ManuallyDrop;
+use std::cell::{Cell, RefCell};
+use std::mem::{ManuallyDrop, MaybeUninit};
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::Wake;
 use std::task::{RawWaker, RawWakerVTable, Waker};
 use std::thread::{self, ThreadId};
+
+pub trait EmbedWake {
+    fn wake(&self, task_id: usize);
+}
+
+pub struct EmbedWaker<'a, W> {
+    refs: Cell<usize>,
+    wake: &'a W,
+    task_id: usize,
+}
+
+impl<'a, W> EmbedWaker<'a, W>
+where
+    W: EmbedWake + 'a,
+{
+    pub fn new(wake: &'a W, task_id: usize) -> Self {
+        Self {
+            refs: Cell::new(1),
+            wake,
+            task_id,
+        }
+    }
+
+    pub fn ref_count(&self) -> usize {
+        self.refs.get()
+    }
+
+    pub fn as_std<'out>(
+        self: Pin<&mut Self>,
+        output_mem: &'out mut MaybeUninit<Waker>,
+    ) -> &'out Waker {
+        let s = &*self;
+
+        let rw = RawWaker::new(
+            s as *const Self as *const (),
+            &RawWakerVTable::new(Self::clone, Self::wake, Self::wake_by_ref, Self::drop),
+        );
+
+        output_mem.write(unsafe { Waker::from_raw(rw) });
+
+        unsafe { output_mem.assume_init_mut() }
+    }
+
+    unsafe fn clone(data: *const ()) -> RawWaker {
+        let s = (data as *const Self).as_ref().unwrap();
+
+        s.refs.set(s.refs.get() + 1);
+
+        RawWaker::new(
+            data,
+            &RawWakerVTable::new(Self::clone, Self::wake, Self::wake_by_ref, Self::drop),
+        )
+    }
+
+    unsafe fn wake(data: *const ()) {
+        Self::wake_by_ref(data);
+
+        Self::drop(data);
+    }
+
+    unsafe fn wake_by_ref(data: *const ()) {
+        let s = (data as *const Self).as_ref().unwrap();
+
+        s.wake.wake(s.task_id);
+    }
+
+    unsafe fn drop(data: *const ()) {
+        let s = (data as *const Self).as_ref().unwrap();
+
+        let refs = s.refs.get();
+
+        assert!(refs > 1);
+
+        s.refs.set(refs - 1);
+    }
+}
 
 pub trait LocalWake {
     fn wake(self: Rc<Self>);

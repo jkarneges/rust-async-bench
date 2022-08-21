@@ -1,14 +1,12 @@
-pub mod executor;
-pub mod future;
 pub mod list;
 pub mod run;
 
+mod executor;
 mod fakeio;
+mod future;
 mod waker;
 
-use crate::run::{run_manual, run_nonbox};
-
 pub fn run() {
-    println!("manual: {}", run_manual(true, |r| r()));
-    println!("nonbox: {}", run_nonbox(true, |r| r()));
+    println!("manual: {}", crate::run::run_manual(true, |r| r()));
+    println!("nonbox: {}", crate::run::run_box(true, |r| r()));
 }
