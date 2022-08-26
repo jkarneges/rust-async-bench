@@ -8,5 +8,5 @@ mod waker;
 
 pub fn run() {
     println!("manual: {}", crate::run::run_manual(true, |r| r()));
-    println!("nonbox: {}", crate::run::run_box(true, |r| r()));
+    println!("nonbox: {}", crate::run::run_nonbox(true, |r| r()));
 }
