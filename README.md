@@ -63,29 +63,29 @@ To measure the speed of the manual event loop vs. the various async implementati
 Some results running on Linux:
 
 ```
-manual                  time:   [24.536 us 24.548 us 24.562 us]
-nonbox                  time:   [90.702 us 90.724 us 90.750 us]
-callerbox               time:   [89.458 us 89.552 us 89.686 us]
-large+nonbox            time:   [186.62 us 186.65 us 186.68 us]
-box                     time:   [98.172 us 98.187 us 98.203 us]
-box+callerbox           time:   [97.099 us 97.143 us 97.201 us]
-large+box               time:   [212.26 us 212.33 us 212.40 us]
-box+rc                  time:   [95.511 us 95.531 us 95.553 us]
-box+chkrc               time:   [111.32 us 111.33 us 111.35 us]
-box+arc                 time:   [102.16 us 102.18 us 102.19 us]
-manual+syscalls         time:   [991.44 us 991.72 us 992.00 us]
-nonbox+syscalls         time:   [1.0841 ms 1.0846 ms 1.0851 ms]
-box+syscalls            time:   [1.1009 ms 1.1013 ms 1.1019 ms]
-box+rc+syscalls         time:   [1.0941 ms 1.0944 ms 1.0948 ms]
-box+chkrc+syscalls      time:   [1.1037 ms 1.1047 ms 1.1058 ms]
-box+arc+syscalls        time:   [1.1041 ms 1.1045 ms 1.1049 ms]
+manual                  time:   [26.262 µs 26.270 µs 26.279 µs]
+nonbox                  time:   [88.471 µs 88.497 µs 88.529 µs]
+callerbox               time:   [91.892 µs 91.907 µs 91.926 µs]
+large+nonbox            time:   [189.18 µs 189.24 µs 189.31 µs]
+box                     time:   [96.430 µs 96.447 µs 96.469 µs]
+box+callerbox           time:   [98.313 µs 98.329 µs 98.347 µs]
+large+box               time:   [212.57 µs 212.72 µs 212.92 µs]
+box+rc                  time:   [98.380 µs 98.399 µs 98.422 µs]
+box+chkrc               time:   [114.84 µs 114.86 µs 114.88 µs]
+box+arc                 time:   [103.19 µs 103.21 µs 103.23 µs]
+manual+syscalls         time:   [988.31 µs 988.57 µs 988.83 µs]
+nonbox+syscalls         time:   [1.0816 ms 1.0821 ms 1.0825 ms]
+box+syscalls            time:   [1.0965 ms 1.0967 ms 1.0970 ms]
+box+rc+syscalls         time:   [1.0981 ms 1.0984 ms 1.0987 ms]
+box+chkrc+syscalls      time:   [1.1174 ms 1.1179 ms 1.1185 ms]
+box+arc+syscalls        time:   [1.1086 ms 1.1089 ms 1.1092 ms]
 ```
 
 ## Analysis
 
 ### Summary
 
-* Async may require 9.3% more CPU than hand written code, but likely much less in real applications.
+* Async may require 9.4% more CPU than hand written code, but likely much less in real applications.
 * Boxing futures has relatively insignificant cost and is worth it for flexibility and ergonomics.
 * Arc-based wakers are the best we've got.
 * Async possibly qualifies as a zero cost abstraction if you've already bought into the `Future` trait. In practice it may have a (very low) cost compared to code that wouldn't have used `Future` or similar.
@@ -104,15 +104,15 @@ Arc-based wakers are slower than unsafe Rc-based wakers (see `box+rc` vs. `box+a
 
 ### Relative costs
 
-In a real application, task accounting should normally be a very small part of overall compute time. The benchmarks with syscalls help highlight this. These benchmarks make a non-blocking call to `libc::read` whenever there is an I/O operation. The read is against a pipe that never has data in it, and so the call always returns an error. Adding in these syscalls significantly reduces the time differences between the benchmarks. For example, `manual` is 73% faster than `nonbox`, but `manual+syscalls` is only 8.6% faster than `nonbox+syscalls` (or reversed, `nonbox+syscalls` is 9.3% slower).
+In a real application, task accounting should normally be a very small part of overall compute time. The benchmarks with syscalls help highlight this. These benchmarks make a non-blocking call to `libc::read` whenever there is an I/O operation. The read is against a pipe that never has data in it, and so the call always returns an error. Adding in these syscalls significantly reduces the time differences between the benchmarks. For example, `manual` is 70% faster than `nonbox`, but `manual+syscalls` is only 8.6% faster than `nonbox+syscalls` (or reversed, `nonbox+syscalls` is 9.4% slower).
 
-These no-op syscalls only scratch the surface in terms of what a real application might do. In a real application, I/O syscalls will likely do meaningful things (such as read non-zero amounts of data) and thus cost more. Real applications will also perform real application logic. The benchmarks test 256 requests. If an application were to spend even 10 microseconds per request doing meaningful work, the manual event loop would only be 2.6% faster.
+These no-op syscalls only scratch the surface in terms of what a real application might do. In a real application, I/O syscalls will likely do meaningful things (such as read non-zero amounts of data) and thus cost more. Real applications will also perform real application logic. The benchmarks test 256 requests. If an application were to spend even 10 microseconds per request doing meaningful work, the manual event loop would only be 2.5% faster.
 
-Another way of looking at it: the difference between `manual` and `nonbox` is 66.1us. Divided by 256, that's an overhead of around 258 nanoseconds for async execution per request. In a real app, that's practically free.
+Another way of looking at it: the difference between `manual` and `nonbox` is 62.2us. Divided by 256, that's an overhead of around 243 nanoseconds for async execution per request. In a real app, that's practically free.
 
 ### Boxing futures
 
-Boxing futures has a small cost (`nonbox+syscalls` is 1.6% faster than `box+syscalls`). However, not boxing has drawbacks too: all futures take up the same amount of space, and spawning needs to be done indirectly to avoid circular references. Also, unless the space for all futures is allocated up front, allocations will need to be made at runtime anyway.
+Boxing futures has a small cost (`nonbox+syscalls` is 1.3% faster than `box+syscalls`). However, not boxing has drawbacks too: all futures take up the same amount of space, and spawning needs to be done indirectly to avoid circular references. Also, unless the space for all futures is allocated up front, allocations will need to be made at runtime anyway.
 
 Given the small relative cost of boxing, the cost is well worth it for the flexibility and ergonomics it brings. A high performance network server running on a typical OS should box its futures.
 
@@ -120,7 +120,7 @@ The only time to avoid boxing might be in hard real-time applications, for examp
 
 ### Rc vs Arc wakers
 
-In theory, Rc-based wakers have legitimate value, in that they are faster than Arc-based wakers (`box+rc+syscalls` is 1% faster than `box+arc+syscalls`) and can simply be dropped in where applicable (single-threaded executors). Unfortunately, it is currently not possible to use Rc-based wakers safely without sacrificing their performance gains.
+In theory, Rc-based wakers have legitimate value, in that they are faster than Arc-based wakers (`box+rc+syscalls` is 0.9% faster than `box+arc+syscalls`) and can simply be dropped in where applicable (single-threaded executors). Unfortunately, it is currently not possible to use Rc-based wakers safely without sacrificing their performance gains.
 
 Using unsafe wakers is probably not worth it for their small relative gains. It seems like it would be a hard thing to audit. Waker construction could be marked `unsafe`, but waker proliferation and use would not be.
 
